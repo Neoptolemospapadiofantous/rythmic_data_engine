@@ -1,0 +1,17 @@
+# Environment — never commit credentials
+.env
+
+# Database and data files
+data/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# Snapshots
+*.tmp
+*_snapshot.duckdb
+*.pull.tmp
