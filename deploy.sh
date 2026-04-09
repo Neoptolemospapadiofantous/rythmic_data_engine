@@ -43,12 +43,10 @@ if [ ! -f boost_1_83_0.tar.gz ]; then
 fi
 echo "   Tarball info: $(ls -lh boost_1_83_0.tar.gz)"
 file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Tarball is corrupt — re-scp it"; exit 1; }
-BOOST_DIR=$(tar tf boost_1_83_0.tar.gz 2>/dev/null | head -1 | cut -d/ -f1)
-echo "   Will extract to: $BOOST_DIR"
-rm -rf "$BOOST_DIR"
+rm -rf boost_1_83_0
 tar xf boost_1_83_0.tar.gz || { echo "Extraction failed"; exit 1; }
-ls -d "$BOOST_DIR" || { echo "Dir missing after extract — tarball may be corrupt"; exit 1; }
-cd "$BOOST_DIR"
+ls -d boost_1_83_0 || { echo "Dir missing after extract"; exit 1; }
+cd boost_1_83_0
 cd boost_1_83_0
 ./bootstrap.sh --prefix=/usr/local \
     --with-libraries=system,thread,filesystem,regex,random,chrono,date_time,atomic 2>&1 | tail -3
