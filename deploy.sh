@@ -40,7 +40,9 @@ if [ ! -f boost_1_83_0.tar.gz ]; then
 fi
 file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Tarball is corrupt"; exit 1; }
 tar xf boost_1_83_0.tar.gz
-cd boost_1_83_0
+BOOST_DIR=$(tar tf boost_1_83_0.tar.gz 2>/dev/null | head -1 | cut -d/ -f1)
+echo "   Boost source dir: $BOOST_DIR"
+cd "$BOOST_DIR"
 cd boost_1_83_0
 ./bootstrap.sh --prefix=/usr/local \
     --with-libraries=system,thread,filesystem,regex,random,chrono,date_time,atomic 2>&1 | tail -3
