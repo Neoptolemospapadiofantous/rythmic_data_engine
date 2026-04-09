@@ -1,0 +1,123 @@
+syntax = "proto3";
+package rti;
+
+// Base — used to extract template_id from any incoming message
+message Base {
+  int32 template_id = 154467;
+}
+
+// ── Login / Logout ─────────────────────────────────────────────────
+
+message RequestLogin {
+  int32 template_id = 154467;
+  string template_version = 153634;
+  repeated string user_msg = 132760;
+  string user = 131003;
+  string password = 130004;
+  string app_name = 130002;
+  string app_version = 131803;
+  string system_name = 153628;
+  SysInfraType infra_type = 153621;
+
+  enum SysInfraType {
+    SYSINFRATYPE_UNSPECIFIED = 0;
+    TICKER_PLANT = 1;
+    ORDER_PLANT = 2;
+    HISTORY_PLANT = 3;
+    PNL_PLANT = 4;
+    REPOSITORY_PLANT = 5;
+  }
+}
+
+message ResponseLogin {
+  int32 template_id = 154467;
+  string template_version = 153634;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+  string unique_user_id = 153428;
+  double heartbeat_interval = 153633;
+}
+
+message RequestLogout {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+}
+
+message ResponseLogout {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+}
+
+// ── System Info ────────────────────────────────────────────────────
+
+message RequestRithmicSystemInfo {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+}
+
+message ResponseRithmicSystemInfo {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+  repeated string system_name = 153628;
+}
+
+// ── Heartbeat ──────────────────────────────────────────────────────
+
+message RequestHeartbeat {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  int32 ssboe = 150100;
+  int32 usecs = 150101;
+}
+
+message ResponseHeartbeat {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+  int32 ssboe = 150100;
+  int32 usecs = 150101;
+}
+
+// ── Market Data ────────────────────────────────────────────────────
+
+message RequestMarketDataUpdate {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  string symbol = 110100;
+  string exchange = 110101;
+  Request request = 100000;
+  uint32 update_bits = 154211;   // 1 = LAST_TRADE
+
+  enum Request {
+    REQUEST_UNSPECIFIED = 0;
+    SUBSCRIBE = 1;
+    UNSUBSCRIBE = 2;
+  }
+}
+
+message ResponseMarketDataUpdate {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+}
+
+// ── Streaming Tick ─────────────────────────────────────────────────
+
+message LastTrade {
+  int32 template_id = 154467;
+  string symbol = 110100;
+  string exchange = 110101;
+  double trade_price = 100006;
+  int32 trade_size = 100178;
+  TransactionType aggressor = 112003;
+  int32 ssboe = 150100;   // seconds since epoch
+  int32 usecs = 150101;   // microseconds
+
+  enum TransactionType {
+    TRANSACTIONTYPE_UNSPECIFIED = 0;
+    BUY = 1;
+    SELL = 2;
+  }
+}

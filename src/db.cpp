@@ -1,0 +1,279 @@
+#include "db.hpp"
+#include "log.hpp"
+
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <ctime>
+#include <stdexcept>
+#include <string>
+
+// ── helpers ────────────────────────────────────────────────────────
+
+static void pg_check(PGresult* res, const char* ctx) {
+    if (!res) throw std::runtime_error(std::string("libpq: null result in ") + ctx);
+    auto s = PQresultStatus(res);
+    if (s != PGRES_COMMAND_OK && s != PGRES_TUPLES_OK) {
+        std::string msg = PQresultErrorMessage(res);
+        PQclear(res);
+        throw std::runtime_error(std::string("DB error [") + ctx + "]: " + msg);
+    }
+}
+
+std::string TickDB::format_ts(int64_t ts_micros) {
+    time_t secs   = static_cast<time_t>(ts_micros / 1'000'000);
+    int    micros = static_cast<int>(ts_micros % 1'000'000);
+    struct tm t;
+    gmtime_r(&secs, &t);
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &t);
+    char result[48];
+    std::snprintf(result, sizeof(result), "%s.%06d+00", buf, micros);
+    return result;
+}
+
+// ── constructor / destructor ───────────────────────────────────────
+
+TickDB::TickDB(const std::string& connstr, bool read_only)
+    : connstr_(connstr), read_only_(read_only)
+{
+    conn_ = PQconnectdb(connstr.c_str());
+    if (PQstatus(conn_) != CONNECTION_OK)
+        throw std::runtime_error(
+            std::string("PostgreSQL connection failed: ") + PQerrorMessage(conn_));
+
+    if (!read_only_)
+        ensure_schema();
+}
+
+TickDB::~TickDB() { close(); }
+
+void TickDB::close() {
+    if (conn_) { PQfinish(conn_); conn_ = nullptr; }
+}
+
+// ── exec ───────────────────────────────────────────────────────────
+
+void TickDB::exec(const char* sql) {
+    PGresult* res = PQexec(conn_, sql);
+    pg_check(res, sql);
+    PQclear(res);
+}
+
+// ── ensure_schema ──────────────────────────────────────────────────
+
+void TickDB::ensure_schema() {
+    // Ticks hypertable
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS ticks (
+            ts_event  TIMESTAMPTZ NOT NULL,
+            price     DOUBLE PRECISION NOT NULL,
+            size      BIGINT NOT NULL,
+            side      CHAR(1),
+            is_buy    BOOLEAN,
+            source    VARCHAR(32) DEFAULT 'amp_rithmic'
+        );
+    )");
+
+    // Create hypertable if not already (idempotent via IF NOT EXISTS equivalent)
+    {
+        PGresult* res = PQexec(conn_,
+            "SELECT create_hypertable('ticks','ts_event',"
+            "  if_not_exists => TRUE, migrate_data => TRUE);");
+        if (res) PQclear(res);  // ignore error if already a hypertable
+    }
+
+    // Unique index for deduplication
+    exec(R"(
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_ts_unique
+            ON ticks(ts_event);
+    )");
+
+    // Compression (optional — saves ~10x space for old chunks)
+    exec(R"(
+        ALTER TABLE ticks SET (
+            timescaledb.compress,
+            timescaledb.compress_orderby = 'ts_event'
+        );
+    )");
+
+    // ── Continuous aggregates (OHLCV bars) ─────────────────────────
+    exec(R"(
+        CREATE MATERIALIZED VIEW IF NOT EXISTS bars_1min
+        WITH (timescaledb.continuous) AS
+        SELECT
+            time_bucket('1 minute', ts_event) AS ts,
+            first(price, ts_event)             AS open,
+            MAX(price)                         AS high,
+            MIN(price)                         AS low,
+            last(price,  ts_event)             AS close,
+            SUM(size)                          AS volume
+        FROM ticks
+        GROUP BY 1
+        WITH NO DATA;
+    )");
+
+    exec(R"(
+        CREATE MATERIALIZED VIEW IF NOT EXISTS bars_5min
+        WITH (timescaledb.continuous) AS
+        SELECT
+            time_bucket('5 minutes', ts_event) AS ts,
+            first(price, ts_event)              AS open,
+            MAX(price)                          AS high,
+            MIN(price)                          AS low,
+            last(price,  ts_event)              AS close,
+            SUM(size)                           AS volume
+        FROM ticks
+        GROUP BY 1
+        WITH NO DATA;
+    )");
+
+    exec(R"(
+        CREATE MATERIALIZED VIEW IF NOT EXISTS bars_15min
+        WITH (timescaledb.continuous) AS
+        SELECT
+            time_bucket('15 minutes', ts_event) AS ts,
+            first(price, ts_event)               AS open,
+            MAX(price)                           AS high,
+            MIN(price)                           AS low,
+            last(price,  ts_event)               AS close,
+            SUM(size)                            AS volume
+        FROM ticks
+        GROUP BY 1
+        WITH NO DATA;
+    )");
+
+    // Refresh policies — keep bars up to date automatically
+    auto add_policy = [&](const char* view, const char* bucket) {
+        char sql[512];
+        std::snprintf(sql, sizeof(sql),
+            "SELECT add_continuous_aggregate_policy('%s',"
+            "  start_offset => INTERVAL '1 hour',"
+            "  end_offset   => INTERVAL '%s',"
+            "  schedule_interval => INTERVAL '%s',"
+            "  if_not_exists => TRUE);",
+            view, bucket, bucket);
+        PGresult* r = PQexec(conn_, sql);
+        if (r) PQclear(r);
+    };
+    add_policy("bars_1min",  "1 minute");
+    add_policy("bars_5min",  "5 minutes");
+    add_policy("bars_15min", "15 minutes");
+
+    // ── Audit log table ────────────────────────────────────────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id        BIGSERIAL PRIMARY KEY,
+            ts        TIMESTAMPTZ DEFAULT NOW(),
+            event     VARCHAR(64)  NOT NULL,
+            severity  VARCHAR(8)   DEFAULT 'INFO',
+            details   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+    )");
+
+    LOG("Schema ready (TimescaleDB hypertable + continuous aggregates)");
+}
+
+// ── write ──────────────────────────────────────────────────────────
+
+int TickDB::write(const std::vector<TickRow>& rows) {
+    if (rows.empty()) return 0;
+
+    // Build array literals for UNNEST batch insert
+    std::string ts_arr, price_arr, size_arr, side_arr, is_buy_arr;
+    ts_arr    .reserve(rows.size() * 32);
+    price_arr .reserve(rows.size() * 12);
+
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (i) { ts_arr += ','; price_arr += ','; size_arr += ',';
+                 side_arr += ','; is_buy_arr += ','; }
+        ts_arr    += '"' + format_ts(rows[i].ts_micros) + '"';
+        price_arr += std::to_string(rows[i].price);
+        size_arr  += std::to_string(rows[i].size);
+        side_arr  += (rows[i].is_buy ? "\"B\"" : "\"A\"");
+        is_buy_arr+= (rows[i].is_buy ? "true"  : "false");
+    }
+
+    ts_arr    = '{' + ts_arr    + '}';
+    price_arr = '{' + price_arr + '}';
+    size_arr  = '{' + size_arr  + '}';
+    side_arr  = '{' + side_arr  + '}';
+    is_buy_arr= '{' + is_buy_arr+ '}';
+
+    const std::string source_arr =
+        "{" + std::string(rows.size() > 1
+            ? std::string(rows.size() - 1, ',').insert(0, "\"amp_rithmic\"")
+            : "") + "}";
+
+    // Build a proper source array
+    std::string src = "{";
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (i) src += ',';
+        src += "\"amp_rithmic\"";
+    }
+    src += '}';
+
+    const char* sql =
+        "INSERT INTO ticks (ts_event, price, size, side, is_buy, source)"
+        " SELECT * FROM unnest("
+        "   $1::timestamptz[],"
+        "   $2::float8[],"
+        "   $3::int8[],"
+        "   $4::char[],"
+        "   $5::bool[],"
+        "   $6::varchar[]"
+        " ) ON CONFLICT (ts_event) DO NOTHING";
+
+    const char* params[6] = {
+        ts_arr.c_str(), price_arr.c_str(), size_arr.c_str(),
+        side_arr.c_str(), is_buy_arr.c_str(), src.c_str()
+    };
+
+    PGresult* res = PQexecParams(conn_, sql, 6, nullptr,
+                                 params, nullptr, nullptr, 0);
+    pg_check(res, "write ticks");
+
+    // Rows inserted = command tag "INSERT 0 N"
+    const char* tag = PQcmdTuples(res);
+    int inserted = tag ? std::atoi(tag) : 0;
+    PQclear(res);
+    return inserted;
+}
+
+// ── read ───────────────────────────────────────────────────────────
+
+int64_t TickDB::row_count() {
+    PGresult* res = PQexec(conn_, "SELECT COUNT(*) FROM ticks");
+    pg_check(res, "row_count");
+    int64_t n = std::stoll(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    return n;
+}
+
+std::optional<double> TickDB::latest_price() {
+    PGresult* res = PQexec(conn_,
+        "SELECT price FROM ticks ORDER BY ts_event DESC LIMIT 1");
+    pg_check(res, "latest_price");
+    std::optional<double> val;
+    if (PQntuples(res) > 0)
+        val = std::stod(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    return val;
+}
+
+DBSummary TickDB::summary() {
+    DBSummary s;
+    s.connstr    = connstr_;
+    s.tick_count = row_count();
+    s.price      = latest_price();
+
+    PGresult* res = PQexec(conn_,
+        "SELECT MIN(ts_event)::text, MAX(ts_event)::text FROM ticks");
+    if (res && PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res) > 0) {
+        if (!PQgetisnull(res, 0, 0)) s.earliest = PQgetvalue(res, 0, 0);
+        if (!PQgetisnull(res, 0, 1)) s.latest   = PQgetvalue(res, 0, 1);
+    }
+    if (res) PQclear(res);
+    return s;
+}

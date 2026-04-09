@@ -1,0 +1,66 @@
+cmake_minimum_required(VERSION 3.20)
+project(rithmic_engine VERSION 1.0.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# ── Dependencies ───────────────────────────────────────────────────
+find_package(Boost 1.82 REQUIRED COMPONENTS system)
+find_package(OpenSSL REQUIRED)
+find_package(Protobuf REQUIRED)
+
+# PostgreSQL (libpq)
+find_package(PostgreSQL REQUIRED)
+
+# ── Protobuf codegen ───────────────────────────────────────────────
+set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/rithmic.proto")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/proto")
+protobuf_generate_cpp(PROTO_SRCS PROTO_HDRS ${PROTO_FILE})
+
+# ── Shared sources (used by main binary and tests) ─────────────────
+set(LIB_SOURCES
+    src/db.cpp
+    src/audit.cpp
+    src/client.cpp
+    src/collector.cpp
+    ${PROTO_SRCS}
+)
+
+add_library(rithmic_lib STATIC ${LIB_SOURCES})
+
+target_include_directories(rithmic_lib PUBLIC
+    src/
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${Boost_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
+    ${PostgreSQL_INCLUDE_DIRS}
+)
+
+target_link_libraries(rithmic_lib PUBLIC
+    Boost::system
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    ${Protobuf_LIBRARIES}
+    ${PostgreSQL_LIBRARIES}
+)
+
+target_compile_definitions(rithmic_lib PUBLIC
+    BOOST_ASIO_HAS_CO_AWAIT
+)
+
+# ── Main binary ────────────────────────────────────────────────────
+add_executable(rithmic_engine src/main.cpp)
+target_link_libraries(rithmic_engine PRIVATE rithmic_lib)
+
+# ── Test binary ────────────────────────────────────────────────────
+add_executable(test_db tests/test_db.cpp)
+target_link_libraries(test_db PRIVATE rithmic_lib)
+target_include_directories(test_db PRIVATE src/)
+
+enable_testing()
+add_test(NAME db_tests COMMAND test_db)
+
+# ── Install ────────────────────────────────────────────────────────
+install(TARGETS rithmic_engine DESTINATION bin)
+install(DIRECTORY certs/ DESTINATION share/rithmic_engine/certs)
