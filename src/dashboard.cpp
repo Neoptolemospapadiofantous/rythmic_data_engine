@@ -33,6 +33,8 @@
 #include "client.hpp"   // also declares global use_awaitable
 #include "config.hpp"
 #include "db.hpp"
+#include "validator.hpp"
+#include "wal.hpp"
 
 // ncurses macros (timeout, erase, etc.) — included last to avoid conflicts
 #include <ncurses.h>
@@ -68,8 +70,9 @@ struct Metrics {
     std::deque<int64_t> rate_ms;
 
     // Totals
-    int64_t session_ticks = 0;
-    int64_t db_ticks      = 0;
+    int64_t session_ticks  = 0;
+    int64_t rejected_ticks = 0;
+    int64_t db_ticks       = 0;
 
     // Pipeline
     int     buf_queued    = 0;
@@ -96,6 +99,7 @@ struct Pipeline {
     const Config&             cfg;
     std::unique_ptr<TickDB>   db;
     std::unique_ptr<AuditLog> audit;
+    std::unique_ptr<Wal>      wal;
     asio::io_context          ioc{1};
     std::unique_ptr<RithmicClient> client;
 
@@ -106,8 +110,22 @@ struct Pipeline {
     explicit Pipeline(const Config& c) : cfg(c) {
         db     = std::make_unique<TickDB>(cfg.pg_connstr());
         audit  = std::make_unique<AuditLog>(db->conn());
+        wal    = std::make_unique<Wal>(cfg.wal_path());
         client = std::make_unique<RithmicClient>(ioc, cfg);
         last_flush = last_audit_flush = std::chrono::steady_clock::now();
+
+        // Replay WAL on startup (crash recovery)
+        auto replayed = wal->replay();
+        if (!replayed.empty()) {
+            try {
+                int n = db->write(replayed);
+                wal->commit();
+                audit->info("wal.replay", "recovered=" + std::to_string(n));
+            } catch (std::exception& e) {
+                audit->error("wal.replay_failed", e.what());
+            }
+        }
+
         {
             std::lock_guard lk(g_metrics.mu);
             g_metrics.pg_up = true;
@@ -116,26 +134,61 @@ struct Pipeline {
 
     void flush_buf() {
         if (buf.empty()) return;
-        auto t0 = std::chrono::steady_clock::now();
+
+        // Step 1: check for accumulated missed batches before appending
+        bool was_dirty = wal->dirty();
+
+        // Step 2: durable WAL write (fdatasync) before any DB operation
+        try { wal->write_batch(buf); } catch (...) {}
+
+        auto t0    = std::chrono::steady_clock::now();
+        bool wrote = false;
+        int  n_written = 0;
+
+        // Step 3: drain into DB (non-blocking — no sleep)
+        // Normal path: WAL was clean → write buf directly (no extra file read).
+        // Recovery path: WAL was dirty → replay everything accumulated so far.
         try {
-            db->write(buf);
+            if (!db->is_connected()) db->reconnect();
+            if (was_dirty) {
+                auto pending = wal->replay();
+                n_written = db->write(pending);
+            } else {
+                n_written = db->write(buf);
+            }
+            wal->commit();
+            wrote = true;
         } catch (std::exception& e) {
             audit->error("ticks.write_error", e.what());
+            // WAL stays dirty; will be replayed on next flush or next startup
         }
+
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                       std::chrono::steady_clock::now() - t0).count();
         {
             std::lock_guard lk(g_metrics.mu);
             g_metrics.last_write_ms = ms;
             g_metrics.buf_queued    = 0;
+            g_metrics.pg_up         = wrote;
         }
-        audit->info("ticks.written", "count=" + std::to_string(buf.size()));
+        if (wrote)
+            audit->info("ticks.written",
+                        "count=" + std::to_string(n_written) +
+                        " batch=" + std::to_string(buf.size()));
         buf.clear();
         last_flush = std::chrono::steady_clock::now();
     }
 
     // Called from Asio thread — no additional locking needed for buf
     void on_tick(TickRow r) {
+        // Validate before buffering
+        std::string reason;
+        if (!TickValidator::valid(r, &reason)) {
+            std::lock_guard lk(g_metrics.mu);
+            ++g_metrics.rejected_ticks;
+            return;
+        }
+
         // Compute wire latency: now − exchange timestamp
         auto now_us = std::chrono::duration_cast<std::chrono::microseconds>(
                           std::chrono::system_clock::now().time_since_epoch()).count();
@@ -285,7 +338,7 @@ static void render() {
     int64_t     qty;
     bool        is_buy;
     int64_t     wire_us;
-    int64_t     session_ticks, db_ticks;
+    int64_t     session_ticks, rejected_ticks, db_ticks;
     int         buf_queued;
     int64_t     last_write_ms;
     double      bar_o, bar_h, bar_l, bar_c;
@@ -296,15 +349,16 @@ static void render() {
 
     {
         std::lock_guard lk(g_metrics.mu);
-        rithmic_up    = g_metrics.rithmic_up;
-        pg_up         = g_metrics.pg_up;
-        status_msg    = g_metrics.status_msg;
-        price         = g_metrics.price;
-        qty           = g_metrics.qty;
-        is_buy        = g_metrics.is_buy;
-        wire_us       = g_metrics.wire_us;
-        session_ticks = g_metrics.session_ticks;
-        db_ticks      = g_metrics.db_ticks;
+        rithmic_up     = g_metrics.rithmic_up;
+        pg_up          = g_metrics.pg_up;
+        status_msg     = g_metrics.status_msg;
+        price          = g_metrics.price;
+        qty            = g_metrics.qty;
+        is_buy         = g_metrics.is_buy;
+        wire_us        = g_metrics.wire_us;
+        session_ticks  = g_metrics.session_ticks;
+        rejected_ticks = g_metrics.rejected_ticks;
+        db_ticks       = g_metrics.db_ticks;
         buf_queued    = g_metrics.buf_queued;
         last_write_ms = g_metrics.last_write_ms;
         bar_o  = g_metrics.bar_o;  bar_h = g_metrics.bar_h;
@@ -405,7 +459,12 @@ static void render() {
     draw_label(r+3, 1, "Session:");
     set_color(C_VALUE); printw("%lld", (long long)session_ticks);
 
-    draw_label(r+4, 1, "DB total:");
+    draw_label(r+4, 1, "Rejected:");
+    if (rejected_ticks > 0) { set_color(C_ERR); }
+    else                     { set_color(C_VALUE); }
+    printw("%lld", (long long)rejected_ticks);
+
+    draw_label(r+5, 1, "DB total:");
     set_color(C_VALUE); printw("%lld", (long long)db_ticks);
 
     if (bar_o > 0) {

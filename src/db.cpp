@@ -52,6 +52,16 @@ void TickDB::close() {
     if (conn_) { PQfinish(conn_); conn_ = nullptr; }
 }
 
+void TickDB::reconnect() {
+    PQreset(conn_);
+    if (PQstatus(conn_) != CONNECTION_OK)
+        throw std::runtime_error(
+            std::string("PostgreSQL reconnect failed: ") + PQerrorMessage(conn_));
+    if (!read_only_)
+        ensure_schema();
+    LOG("PostgreSQL reconnected");
+}
+
 // ── exec ───────────────────────────────────────────────────────────
 
 void TickDB::exec(const char* sql) {
@@ -206,7 +216,11 @@ int TickDB::write(const std::vector<TickRow>& rows) {
 
     // Build array literals for UNNEST batch insert
     std::string ts_arr, sym_arr, exch_arr, price_arr, size_arr, side_arr, is_buy_arr, src_arr;
-    ts_arr.reserve(rows.size() * 32);
+    // Reserve capacity to avoid reallocation (ts string dominates at ~32 chars each)
+    const std::size_t N = rows.size();
+    ts_arr.reserve(N * 34);  sym_arr.reserve(N * 8);  exch_arr.reserve(N * 8);
+    price_arr.reserve(N * 12); size_arr.reserve(N * 8); side_arr.reserve(N * 6);
+    is_buy_arr.reserve(N * 6); src_arr.reserve(N * 16);
 
     for (size_t i = 0; i < rows.size(); ++i) {
         if (i) {

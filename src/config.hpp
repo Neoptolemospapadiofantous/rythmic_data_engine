@@ -27,6 +27,9 @@ struct Config {
 
     // ── Paths ──────────────────────────────────────────────────────
     std::string cert_path   = "certs/rithmic_ssl_cert_auth_params";
+    std::string wal_path_   = "ticks.wal";
+
+    std::string wal_path() const { return wal_path_; }
 
     // Build a libpq connection string
     std::string pg_connstr() const {

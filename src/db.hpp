@@ -47,6 +47,12 @@ public:
     // Write a batch of ticks; returns the number actually inserted (after dedup)
     int write(const std::vector<TickRow>& rows);
 
+    // Reconnect after a DB failure (PQreset + schema check)
+    void reconnect();
+
+    // Returns true if the connection is currently alive
+    bool is_connected() const { return conn_ && PQstatus(conn_) == CONNECTION_OK; }
+
     // Read helpers
     int64_t               row_count();
     std::optional<double> latest_price();

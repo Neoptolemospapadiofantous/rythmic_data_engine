@@ -11,6 +11,7 @@
 #include "client.hpp"
 #include "config.hpp"
 #include "db.hpp"
+#include "wal.hpp"
 
 namespace asio = boost::asio;
 
@@ -33,6 +34,7 @@ private:
     Config                         cfg_;
     std::unique_ptr<TickDB>        db_;
     std::unique_ptr<AuditLog>      audit_;
+    std::unique_ptr<Wal>           wal_;
     asio::io_context               ioc_;
     std::unique_ptr<RithmicClient> client_;
 
@@ -42,5 +44,6 @@ private:
     std::chrono::steady_clock::time_point last_audit_flush_;
 
     std::atomic<int64_t> session_total_{0};
+    std::atomic<int64_t> rejected_total_{0};
     std::atomic<bool>    running_{true};
 };
