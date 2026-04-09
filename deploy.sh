@@ -34,9 +34,13 @@ echo "[3/5] Building Boost 1.83 from source (takes ~10 min)..."
 cd /tmp
 if [ ! -f boost_1_83_0.tar.gz ]; then
     curl -L -o boost_1_83_0.tar.gz \
-        https://boostorg.jfrog.io/artifactory/main/release/1.83.0/source/boost_1_83_0.tar.gz
+        "https://github.com/boostorg/boost/releases/download/boost-1.83.0/boost-1.83.0.tar.gz"
 fi
+# Verify it's actually a tarball
+file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Download failed"; exit 1; }
 tar xf boost_1_83_0.tar.gz
+# GitHub release extracts as boost-1.83.0 (with dashes)
+[ -d boost-1.83.0 ] && cd boost-1.83.0 || cd boost_1_83_0
 cd boost_1_83_0
 ./bootstrap.sh --prefix=/usr/local \
     --with-libraries=system,thread,filesystem,regex,random,chrono,date_time,atomic 2>&1 | tail -3
