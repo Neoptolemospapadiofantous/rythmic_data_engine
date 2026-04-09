@@ -31,12 +31,15 @@ echo "   Extension OK"
 
 # ── Boost 1.83 from source (system has 1.75, need 1.82+) ─────────────
 echo "[3/5] Building Boost 1.83 from source (takes ~10 min)..."
-cd /tmp
+echo "   Disk space:"
+df -h /tmp ~ | tail -3
+cd ~
 if [ ! -f boost_1_83_0.tar.gz ]; then
-    echo "Boost tarball not found at /tmp/boost_1_83_0.tar.gz"
-    echo "Copy it from your local machine with:"
-    echo "  scp /tmp/boost_1_83_0.tar.gz opc@<ip>:/tmp/"
-    exit 1
+    cp /tmp/boost_1_83_0.tar.gz . 2>/dev/null || {
+        echo "Boost tarball not found. Copy it with:"
+        echo "  scp /tmp/boost_1_83_0.tar.gz opc@<ip>:~/"
+        exit 1
+    }
 fi
 echo "   Tarball info: $(ls -lh boost_1_83_0.tar.gz)"
 file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Tarball is corrupt — re-scp it"; exit 1; }
