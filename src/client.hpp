@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include <boost/asio.hpp>
 #include <boost/asio/ssl.hpp>
@@ -14,6 +15,33 @@
 
 #include "config.hpp"
 #include "db.hpp"
+
+// ── ConnectionTestResult ───────────────────────────────────────────
+// Returned by RithmicClient::run_connection_test().
+// Each Step records one stage of the handshake/data-flow pipeline.
+struct ConnectionTestResult {
+    struct Step {
+        std::string name;
+        int64_t     ms   {-1};   // wall-clock duration
+        bool        ok   {false};
+        std::string detail;
+    };
+    std::vector<Step> steps;
+
+    double  first_price     = 0;
+    int64_t first_size      = 0;
+    bool    first_is_buy    = false;
+    int64_t wire_latency_us = 0;   // now − tick.ssboe+usecs
+    int64_t db_total_ticks  = 0;
+
+    bool all_ok() const {
+        if (steps.empty()) return false;
+        for (auto& s : steps) if (!s.ok) return false;
+        return true;
+    }
+
+    void print() const;   // defined in client.cpp
+};
 
 namespace asio      = boost::asio;
 namespace beast     = boost::beast;
@@ -39,6 +67,8 @@ using TickCallback = std::function<void(TickRow)>;
 //   3. Receive loop — dispatch LastTrade(150), send heartbeats on schedule
 class RithmicClient {
 public:
+    using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
+
     explicit RithmicClient(asio::io_context& ioc, const Config& cfg);
 
     // Set the callback invoked for each tick
@@ -47,13 +77,16 @@ public:
     // Run the connection + reconnection loop (runs until stop() is called)
     asio::awaitable<void> run();
 
+    // Step-by-step timed connection + data-flow test.
+    // Connects, logs in, receives n_ticks ticks, writes them to db, reads back.
+    // Returns a ConnectionTestResult with per-step timing and pass/fail.
+    asio::awaitable<ConnectionTestResult>
+    run_connection_test(TickDB& db, int n_ticks = 5);
+
     // Request a clean shutdown
     void stop() { running_ = false; }
 
 private:
-    // ── WebSocket type ─────────────────────────────────────────────
-    using WsStream = websocket::stream<beast::ssl_stream<beast::tcp_stream>>;
-
     // ── helpers ────────────────────────────────────────────────────
     asio::awaitable<std::unique_ptr<WsStream>> connect_ws();
 

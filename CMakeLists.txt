@@ -12,6 +12,7 @@ find_package(Protobuf REQUIRED)
 
 # PostgreSQL (libpq)
 find_package(PostgreSQL REQUIRED)
+find_package(Curses REQUIRED)
 
 # ── Protobuf codegen ───────────────────────────────────────────────
 set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/rithmic.proto")
@@ -53,13 +54,22 @@ target_compile_definitions(rithmic_lib PUBLIC
 add_executable(rithmic_engine src/main.cpp)
 target_link_libraries(rithmic_engine PRIVATE rithmic_lib)
 
-# ── Test binary ────────────────────────────────────────────────────
+# ── Test binaries ──────────────────────────────────────────────────
 add_executable(test_db tests/test_db.cpp)
 target_link_libraries(test_db PRIVATE rithmic_lib)
 target_include_directories(test_db PRIVATE src/)
 
+add_executable(test_connection tests/test_connection.cpp)
+target_link_libraries(test_connection PRIVATE rithmic_lib)
+target_include_directories(test_connection PRIVATE src/)
+
 enable_testing()
 add_test(NAME db_tests COMMAND test_db)
+
+# ── Dashboard (ncurses TUI) ────────────────────────────────────────
+add_executable(dashboard src/dashboard.cpp)
+target_link_libraries(dashboard PRIVATE rithmic_lib ${CURSES_LIBRARIES})
+target_include_directories(dashboard PRIVATE src/ ${CURSES_INCLUDE_DIRS})
 
 # ── Install ────────────────────────────────────────────────────────
 install(TARGETS rithmic_engine DESTINATION bin)
