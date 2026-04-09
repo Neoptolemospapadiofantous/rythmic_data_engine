@@ -99,8 +99,15 @@ void TickDB::ensure_schema() {
         if (res) PQclear(res);  // ignore: already set, or TimescaleDB not loaded
     }
 
-    // ── Continuous aggregates (OHLCV bars) ─────────────────────────
-    exec(R"(
+    // ── Continuous aggregates (OHLCV bars) ────────────────────────
+    // These require TimescaleDB.  Wrapped in non-throwing PQexec so the
+    // engine still runs on plain PostgreSQL (bars just won't be available).
+    auto ts_exec = [&](const char* sql) {
+        PGresult* r = PQexec(conn_, sql);
+        if (r) PQclear(r);
+    };
+
+    ts_exec(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_1min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -115,7 +122,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    exec(R"(
+    ts_exec(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_5min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -130,7 +137,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    exec(R"(
+    ts_exec(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_15min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -145,7 +152,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    // Refresh policies — keep bars up to date automatically
+    // Refresh policies (also TimescaleDB-only — ignore errors silently)
     auto add_policy = [&](const char* view, const char* bucket) {
         char sql[512];
         std::snprintf(sql, sizeof(sql),
