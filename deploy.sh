@@ -33,10 +33,12 @@ echo "   Extension OK"
 echo "[3/5] Building Boost 1.83 from source (takes ~10 min)..."
 cd /tmp
 if [ ! -f boost_1_83_0.tar.gz ]; then
-    curl -L -o boost_1_83_0.tar.gz \
-        "https://archives.boost.io/release/1.83.0/source/boost_1_83_0.tar.gz"
+    echo "Boost tarball not found at /tmp/boost_1_83_0.tar.gz"
+    echo "Copy it from your local machine with:"
+    echo "  scp /tmp/boost_1_83_0.tar.gz opc@<ip>:/tmp/"
+    exit 1
 fi
-file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Download failed — check network"; exit 1; }
+file boost_1_83_0.tar.gz | grep -q "gzip" || { echo "Tarball is corrupt"; exit 1; }
 tar xf boost_1_83_0.tar.gz
 cd boost_1_83_0
 cd boost_1_83_0
