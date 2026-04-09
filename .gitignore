@@ -1,17 +1,19 @@
-# Environment — never commit credentials
+# Credentials — never commit
 .env
 
-# Database and data files
+# Data directory (DB files, logs)
 data/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-.venv/
-*.egg-info/
+# C++ build artifacts
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.a
+*.so
+compile_commands.json
 
-# Snapshots
-*.tmp
-*_snapshot.duckdb
-*.pull.tmp
+# Generated protobuf files
+proto/*.pb.cc
+proto/*.pb.h

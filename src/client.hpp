@@ -71,12 +71,25 @@ private:
     asio::awaitable<void> receive_loop(WsStream& ws);
     void dispatch_message(const std::string& payload);
 
-    // Serialize proto message + 4-byte length prefix → wire bytes
+    // Serialize proto message with Rithmic 4-byte big-endian length prefix
     template <class Msg>
-    static std::string frame(const Msg& msg);
+    static std::string frame(const Msg& msg) {
+        std::string payload = msg.SerializeAsString();
+        int32_t len = 0;
+        // big-endian encode
+        auto sz = static_cast<uint32_t>(payload.size());
+        len = static_cast<int32_t>(__builtin_bswap32(sz));
+        std::string wire(reinterpret_cast<char*>(&len), 4);
+        wire += payload;
+        return wire;
+    }
 
-    // Parse the 4-byte length prefix, return the raw protobuf payload
-    static std::string strip_header(const std::string& wire);
+    // Strip 4-byte length prefix, return raw protobuf payload
+    static std::string strip_header(const std::string& wire) {
+        if (wire.size() < 4)
+            throw std::runtime_error("Rithmic: message too short");
+        return wire.substr(4);
+    }
 
     asio::io_context&  ioc_;
     ssl::context       ssl_ctx_;

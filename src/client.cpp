@@ -7,32 +7,13 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 #include <boost/asio/experimental/parallel_group.hpp>
 #include <boost/asio/steady_timer.hpp>
-#include <boost/endian/conversion.hpp>
 
 #include <chrono>
-#include <cstring>
 #include <stdexcept>
 #include <string>
 
 namespace asio_exp = boost::asio::experimental;
 using namespace asio_exp::awaitable_operators;
-
-// ── Framing helpers ────────────────────────────────────────────────
-
-template <class Msg>
-std::string RithmicClient::frame(const Msg& msg) {
-    std::string payload = msg.SerializeAsString();
-    int32_t len = boost::endian::native_to_big(static_cast<int32_t>(payload.size()));
-    std::string wire(reinterpret_cast<char*>(&len), 4);
-    wire += payload;
-    return wire;
-}
-
-std::string RithmicClient::strip_header(const std::string& wire) {
-    if (wire.size() < 4)
-        throw std::runtime_error("Rithmic: message too short");
-    return wire.substr(4);
-}
 
 // ── Constructor ────────────────────────────────────────────────────
 

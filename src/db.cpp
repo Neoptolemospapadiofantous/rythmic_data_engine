@@ -89,13 +89,15 @@ void TickDB::ensure_schema() {
             ON ticks(ts_event);
     )");
 
-    // Compression (optional — saves ~10x space for old chunks)
-    exec(R"(
-        ALTER TABLE ticks SET (
-            timescaledb.compress,
-            timescaledb.compress_orderby = 'ts_event'
-        );
-    )");
+    // Compression — non-fatal (requires TimescaleDB; skipped if unavailable)
+    {
+        PGresult* res = PQexec(conn_,
+            "ALTER TABLE ticks SET ("
+            "  timescaledb.compress,"
+            "  timescaledb.compress_orderby = 'ts_event'"
+            ");");
+        if (res) PQclear(res);  // ignore: already set, or TimescaleDB not loaded
+    }
 
     // ── Continuous aggregates (OHLCV bars) ─────────────────────────
     exec(R"(
@@ -201,12 +203,6 @@ int TickDB::write(const std::vector<TickRow>& rows) {
     side_arr  = '{' + side_arr  + '}';
     is_buy_arr= '{' + is_buy_arr+ '}';
 
-    const std::string source_arr =
-        "{" + std::string(rows.size() > 1
-            ? std::string(rows.size() - 1, ',').insert(0, "\"amp_rithmic\"")
-            : "") + "}";
-
-    // Build a proper source array
     std::string src = "{";
     for (size_t i = 0; i < rows.size(); ++i) {
         if (i) src += ',';
