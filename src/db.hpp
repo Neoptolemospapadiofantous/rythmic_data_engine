@@ -9,10 +9,12 @@
 #include <libpq-fe.h>
 
 struct TickRow {
-    int64_t ts_micros;   // microseconds since Unix epoch (UTC)
-    double  price;
-    int64_t size;
-    bool    is_buy;
+    int64_t     ts_micros;   // microseconds since Unix epoch (UTC)
+    double      price;
+    int64_t     size;
+    bool        is_buy;
+    std::string symbol;      // e.g. "NQ", "ES", "CL"
+    std::string exchange;    // e.g. "CME", "NYMEX"
 };
 
 struct DBSummary {

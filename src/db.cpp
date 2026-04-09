@@ -63,30 +63,45 @@ void TickDB::exec(const char* sql) {
 // ── ensure_schema ──────────────────────────────────────────────────
 
 void TickDB::ensure_schema() {
-    // Ticks hypertable
+    // Ticks hypertable — stores every raw trade print
     exec(R"(
         CREATE TABLE IF NOT EXISTS ticks (
-            ts_event  TIMESTAMPTZ NOT NULL,
+            ts_event  TIMESTAMPTZ      NOT NULL,
+            symbol    VARCHAR(32)      NOT NULL DEFAULT 'NQ',
+            exchange  VARCHAR(32)      NOT NULL DEFAULT 'CME',
             price     DOUBLE PRECISION NOT NULL,
-            size      BIGINT NOT NULL,
+            size      BIGINT           NOT NULL,
             side      CHAR(1),
             is_buy    BOOLEAN,
-            source    VARCHAR(32) DEFAULT 'amp_rithmic'
+            source    VARCHAR(32)      DEFAULT 'amp_rithmic'
         );
     )");
 
-    // Create hypertable if not already (idempotent via IF NOT EXISTS equivalent)
+    // Add columns to existing tables (idempotent — safe to run every start)
+    {
+        PGresult* r;
+        r = PQexec(conn_, "ALTER TABLE ticks ADD COLUMN IF NOT EXISTS symbol   VARCHAR(32) NOT NULL DEFAULT 'NQ';");  if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE ticks ADD COLUMN IF NOT EXISTS exchange VARCHAR(32) NOT NULL DEFAULT 'CME';"); if (r) PQclear(r);
+    }
+
+    // Create hypertable (idempotent)
     {
         PGresult* res = PQexec(conn_,
             "SELECT create_hypertable('ticks','ts_event',"
             "  if_not_exists => TRUE, migrate_data => TRUE);");
-        if (res) PQclear(res);  // ignore error if already a hypertable
+        if (res) PQclear(res);
     }
 
-    // Unique index for deduplication
+    // Unique index: (symbol, exchange, ts_event) — two instruments can tick
+    // at the same microsecond; old single-column index dropped if present
+    {
+        PGresult* r;
+        r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_ts_unique;");
+        if (r) PQclear(r);
+    }
     exec(R"(
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_ts_unique
-            ON ticks(ts_event);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_unique
+            ON ticks(symbol, exchange, ts_event);
     )");
 
     // Compression — non-fatal (requires TimescaleDB; skipped if unavailable)
@@ -190,54 +205,57 @@ int TickDB::write(const std::vector<TickRow>& rows) {
     if (rows.empty()) return 0;
 
     // Build array literals for UNNEST batch insert
-    std::string ts_arr, price_arr, size_arr, side_arr, is_buy_arr;
-    ts_arr    .reserve(rows.size() * 32);
-    price_arr .reserve(rows.size() * 12);
+    std::string ts_arr, sym_arr, exch_arr, price_arr, size_arr, side_arr, is_buy_arr, src_arr;
+    ts_arr.reserve(rows.size() * 32);
 
     for (size_t i = 0; i < rows.size(); ++i) {
-        if (i) { ts_arr += ','; price_arr += ','; size_arr += ',';
-                 side_arr += ','; is_buy_arr += ','; }
+        if (i) {
+            ts_arr    += ','; sym_arr  += ','; exch_arr   += ',';
+            price_arr += ','; size_arr += ','; side_arr   += ',';
+            is_buy_arr+= ','; src_arr  += ',';
+        }
         ts_arr    += '"' + format_ts(rows[i].ts_micros) + '"';
+        sym_arr   += '"' + rows[i].symbol   + '"';
+        exch_arr  += '"' + rows[i].exchange + '"';
         price_arr += std::to_string(rows[i].price);
         size_arr  += std::to_string(rows[i].size);
         side_arr  += (rows[i].is_buy ? "\"B\"" : "\"A\"");
         is_buy_arr+= (rows[i].is_buy ? "true"  : "false");
+        src_arr   += "\"amp_rithmic\"";
     }
 
     ts_arr    = '{' + ts_arr    + '}';
+    sym_arr   = '{' + sym_arr   + '}';
+    exch_arr  = '{' + exch_arr  + '}';
     price_arr = '{' + price_arr + '}';
     size_arr  = '{' + size_arr  + '}';
     side_arr  = '{' + side_arr  + '}';
     is_buy_arr= '{' + is_buy_arr+ '}';
-
-    std::string src = "{";
-    for (size_t i = 0; i < rows.size(); ++i) {
-        if (i) src += ',';
-        src += "\"amp_rithmic\"";
-    }
-    src += '}';
+    src_arr   = '{' + src_arr   + '}';
 
     const char* sql =
-        "INSERT INTO ticks (ts_event, price, size, side, is_buy, source)"
+        "INSERT INTO ticks (ts_event, symbol, exchange, price, size, side, is_buy, source)"
         " SELECT * FROM unnest("
         "   $1::timestamptz[],"
-        "   $2::float8[],"
-        "   $3::int8[],"
-        "   $4::char[],"
-        "   $5::bool[],"
-        "   $6::varchar[]"
-        " ) ON CONFLICT (ts_event) DO NOTHING";
+        "   $2::varchar[],"
+        "   $3::varchar[],"
+        "   $4::float8[],"
+        "   $5::int8[],"
+        "   $6::char[],"
+        "   $7::bool[],"
+        "   $8::varchar[]"
+        " ) ON CONFLICT (symbol, exchange, ts_event) DO NOTHING";
 
-    const char* params[6] = {
-        ts_arr.c_str(), price_arr.c_str(), size_arr.c_str(),
-        side_arr.c_str(), is_buy_arr.c_str(), src.c_str()
+    const char* params[8] = {
+        ts_arr.c_str(), sym_arr.c_str(), exch_arr.c_str(),
+        price_arr.c_str(), size_arr.c_str(),
+        side_arr.c_str(), is_buy_arr.c_str(), src_arr.c_str()
     };
 
-    PGresult* res = PQexecParams(conn_, sql, 6, nullptr,
+    PGresult* res = PQexecParams(conn_, sql, 8, nullptr,
                                  params, nullptr, nullptr, 0);
     pg_check(res, "write ticks");
 
-    // Rows inserted = command tag "INSERT 0 N"
     const char* tag = PQcmdTuples(res);
     int inserted = tag ? std::atoi(tag) : 0;
     PQclear(res);

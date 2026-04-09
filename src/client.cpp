@@ -312,6 +312,9 @@ RithmicClient::run_connection_test(TickDB& db, int n_ticks) {
             int64_t ts_us  = static_cast<int64_t>(lt.ssboe()) * 1'000'000LL + lt.usecs();
             bool    is_buy = (lt.aggressor() == rti::LastTrade::BUY);
 
+            std::string sym  = lt.symbol().empty()  ? cfg_.symbol   : lt.symbol();
+            std::string exch = lt.exchange().empty() ? cfg_.exchange : lt.exchange();
+
             if (ticks.empty()) {
                 result.first_price   = lt.trade_price();
                 result.first_size    = lt.trade_size();
@@ -320,7 +323,8 @@ RithmicClient::run_connection_test(TickDB& db, int n_ticks) {
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 result.wire_latency_us = now_us - ts_us;
             }
-            ticks.push_back({ts_us, lt.trade_price(), lt.trade_size(), is_buy});
+            ticks.push_back({ts_us, lt.trade_price(), lt.trade_size(),
+                             is_buy, sym, exch});
         }
 
         int got = static_cast<int>(ticks.size());
@@ -389,9 +393,14 @@ void RithmicClient::dispatch_message(const std::string& payload) {
 
         bool is_buy = (lt.aggressor() == rti::LastTrade::BUY);
 
+        // Use symbol/exchange from message if present, fall back to config
+        std::string sym  = lt.symbol().empty()   ? cfg_.symbol   : lt.symbol();
+        std::string exch = lt.exchange().empty()  ? cfg_.exchange : lt.exchange();
+
         if (on_tick_)
             on_tick_(TickRow{ts_micros, lt.trade_price(),
-                             lt.trade_size(), is_buy});
+                             lt.trade_size(), is_buy,
+                             std::move(sym), std::move(exch)});
     }
     // template_id 19 = ResponseHeartbeat — silently ignored
     // template_id 101 = ResponseMarketDataUpdate — silently ignored

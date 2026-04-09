@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <csignal>
 #include <cstdio>
 #include <deque>
@@ -344,13 +345,13 @@ static void render() {
     // Rithmic dot
     r = 3;
     draw_label(r, 1, "Rithmic:");
-    if (rithmic_up) { set_color(C_OK);  printw("● CONNECTED"); }
-    else            { set_color(C_ERR); printw("○ waiting");   }
+    if (rithmic_up) { set_color(C_OK);  printw("[UP] CONNECTED"); }
+    else            { set_color(C_ERR); printw("[..] waiting");   }
 
     // PostgreSQL dot
     draw_label(r+1, 1, "PostgreSQL:");
-    if (pg_up) { set_color(C_OK);  printw("● OK");    }
-    else       { set_color(C_ERR); printw("○ error"); }
+    if (pg_up) { set_color(C_OK);  printw("[UP] OK");    }
+    else       { set_color(C_ERR); printw("[!!] error"); }
 
     // Status message
     set_color(C_DIM);
@@ -365,8 +366,8 @@ static void render() {
     // Side / qty
     draw_label(r+1, midcol, "Side / Qty:");
     if (price > 0) {
-        if (is_buy) { set_color(C_OK);  printw("BUY  ↑"); }
-        else        { set_color(C_ERR); printw("SELL ↓"); }
+        if (is_buy) { set_color(C_OK);  printw("BUY  ^"); }
+        else        { set_color(C_ERR); printw("SELL v"); }
         set_color(C_VALUE);
         printw("   %lld", (long long)qty);
     } else {
@@ -377,7 +378,7 @@ static void render() {
     set_color(C_VALUE);
     draw_label(r+2, midcol, "Wire latency:");
     if (wire_us > 0)
-        printw("%lld µs  (%.1f ms)", (long long)wire_us, wire_us / 1000.0);
+        printw("%lld us  (%.1f ms)", (long long)wire_us, wire_us / 1000.0);
     else
         printw("--");
 
@@ -520,6 +521,7 @@ int main(int argc, char* argv[]) {
     std::thread asio_thread([&] { pipeline->run(); });
 
     // ── ncurses init ──────────────────────────────────────────────
+    setlocale(LC_ALL, "");   // required for correct character width calculation
     initscr();
     cbreak();
     noecho();
