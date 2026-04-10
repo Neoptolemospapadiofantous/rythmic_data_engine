@@ -17,6 +17,32 @@ struct TickRow {
     std::string exchange;    // e.g. "CME", "NYMEX"
 };
 
+struct BBORow {
+    int64_t     ts_micros;
+    double      bid_price;
+    int32_t     bid_size;
+    int32_t     bid_orders;
+    double      ask_price;
+    int32_t     ask_size;
+    int32_t     ask_orders;
+    std::string symbol;
+    std::string exchange;
+};
+
+struct DepthRow {
+    int64_t     ts_micros;         // from ssboe+usecs
+    int64_t     source_ns;         // from source_ssboe+source_nsecs (nanosecond precision)
+    int64_t     sequence_number;
+    int8_t      update_type;       // 1=NEW, 2=CHANGE, 3=DELETE
+    int8_t      transaction_type;  // 1=BUY, 2=SELL
+    double      depth_price;
+    double      prev_depth_price;
+    int32_t     depth_size;
+    std::string exchange_order_id;
+    std::string symbol;
+    std::string exchange;
+};
+
 struct DBSummary {
     int64_t               tick_count = 0;
     std::string           earliest;
@@ -46,6 +72,12 @@ public:
 
     // Write a batch of ticks; returns the number actually inserted (after dedup)
     int write(const std::vector<TickRow>& rows);
+
+    // Write a batch of BBO snapshots; returns the number actually inserted
+    int write_bbo(const std::vector<BBORow>& rows);
+
+    // Write a batch of depth-by-order events; returns the number actually inserted
+    int write_depth(const std::vector<DepthRow>& rows);
 
     // Reconnect after a DB failure (PQreset + schema check)
     void reconnect();

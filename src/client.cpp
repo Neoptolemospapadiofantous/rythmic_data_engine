@@ -179,9 +179,22 @@ asio::awaitable<void> RithmicClient::subscribe(WsStream& ws,
     req.set_symbol(symbol);
     req.set_exchange(exchange);
     req.set_request(rti::RequestMarketDataUpdate::SUBSCRIBE);
-    req.set_update_bits(1);  // LAST_TRADE
+    req.set_update_bits(1 | 2);  // LAST_TRADE | BBO
     co_await ws_write(ws, frame(req));
-    LOG("Subscribed to %s/%s", symbol.c_str(), exchange.c_str());
+    LOG("Subscribed to %s/%s (LAST_TRADE|BBO)", symbol.c_str(), exchange.c_str());
+}
+
+asio::awaitable<void> RithmicClient::subscribe_depth(WsStream& ws,
+                                                      const std::string& symbol,
+                                                      const std::string& exchange) {
+    rti::RequestMarketDataUpdate req;
+    req.set_template_id(100);
+    req.set_symbol(symbol);
+    req.set_exchange(exchange);
+    req.set_request(rti::RequestMarketDataUpdate::SUBSCRIBE);
+    req.set_update_bits(64);  // DEPTH_BY_ORDER
+    co_await ws_write(ws, frame(req));
+    LOG("Subscribed depth-by-order for %s/%s", symbol.c_str(), exchange.c_str());
 }
 
 asio::awaitable<void> RithmicClient::unsubscribe(WsStream& ws,
@@ -401,6 +414,44 @@ void RithmicClient::dispatch_message(const std::string& payload) {
             on_tick_(TickRow{ts_micros, lt.trade_price(),
                              lt.trade_size(), is_buy,
                              std::move(sym), std::move(exch)});
+
+    } else if (base.template_id() == 151) {
+        rti::BestBidOffer bbo;
+        bbo.ParseFromString(payload);
+
+        if (bbo.bid_price() <= 0 || bbo.ask_price() <= 0) return;
+
+        int64_t ts_us = static_cast<int64_t>(bbo.ssboe()) * 1'000'000LL +
+                        static_cast<int64_t>(bbo.usecs());
+
+        std::string sym  = bbo.symbol().empty()   ? cfg_.symbol   : bbo.symbol();
+        std::string exch = bbo.exchange().empty()  ? cfg_.exchange : bbo.exchange();
+
+        if (on_bbo_)
+            on_bbo_(BBORow{ts_us,
+                           bbo.bid_price(), bbo.bid_size(), bbo.bid_orders(),
+                           bbo.ask_price(), bbo.ask_size(), bbo.ask_orders(),
+                           std::move(sym), std::move(exch)});
+
+    } else if (base.template_id() == 160) {
+        rti::DepthByOrder dbo;
+        dbo.ParseFromString(payload);
+
+        if (dbo.depth_price() <= 0) return;
+
+        int64_t ts_us  = static_cast<int64_t>(dbo.ssboe()) * 1'000'000LL +
+                         static_cast<int64_t>(dbo.usecs());
+        int64_t src_ns = static_cast<int64_t>(dbo.source_ssboe()) * 1'000'000'000LL +
+                         static_cast<int64_t>(dbo.source_nsecs());
+
+        if (on_depth_)
+            on_depth_(DepthRow{ts_us, src_ns, dbo.sequence_number(),
+                               static_cast<int8_t>(dbo.update_type()),
+                               static_cast<int8_t>(dbo.transaction_type()),
+                               dbo.depth_price(), dbo.prev_depth_price(),
+                               dbo.depth_size(), dbo.exchange_order_id(),
+                               dbo.symbol().empty()   ? cfg_.symbol   : dbo.symbol(),
+                               dbo.exchange().empty()  ? cfg_.exchange : dbo.exchange()});
     }
     // template_id 19 = ResponseHeartbeat — silently ignored
     // template_id 101 = ResponseMarketDataUpdate — silently ignored
@@ -471,6 +522,7 @@ asio::awaitable<void> RithmicClient::run() {
                     contract.c_str(), cfg_.exchange.c_str());
 
                 co_await subscribe(*ws, contract, cfg_.exchange);
+                co_await subscribe_depth(*ws, contract, cfg_.exchange);
                 co_await receive_loop(*ws);
 
                 // Clean shutdown

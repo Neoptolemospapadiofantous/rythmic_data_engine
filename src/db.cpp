@@ -102,16 +102,19 @@ void TickDB::ensure_schema() {
         if (res) PQclear(res);
     }
 
-    // Unique index: (symbol, exchange, ts_event) — two instruments can tick
-    // at the same microsecond; old single-column index dropped if present
+    // Unique index: (symbol, exchange, ts_event, price, size) — preserves all
+    // real distinct trades that share a microsecond timestamp (e.g. Databento ns
+    // data floored to µs for TIMESTAMPTZ storage).  Old narrower indexes dropped.
     {
         PGresult* r;
         r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_ts_unique;");
         if (r) PQclear(r);
+        r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_unique;");
+        if (r) PQclear(r);
     }
     exec(R"(
         CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_unique
-            ON ticks(symbol, exchange, ts_event);
+            ON ticks(symbol, exchange, ts_event, price, size);
     )");
 
     // Compression — non-fatal (requires TimescaleDB; skipped if unavailable)
@@ -194,6 +197,68 @@ void TickDB::ensure_schema() {
     add_policy("bars_5min",  "5 minutes");
     add_policy("bars_15min", "15 minutes");
 
+    // ── BBO hypertable — top-of-book snapshots ─────────────────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS bbo (
+            ts_event   TIMESTAMPTZ      NOT NULL,
+            symbol     VARCHAR(32)      NOT NULL DEFAULT 'NQ',
+            exchange   VARCHAR(32)      NOT NULL DEFAULT 'CME',
+            bid_price  DOUBLE PRECISION,
+            bid_size   INTEGER,
+            bid_orders INTEGER,
+            ask_price  DOUBLE PRECISION,
+            ask_size   INTEGER,
+            ask_orders INTEGER,
+            source     VARCHAR(32)      DEFAULT 'amp_rithmic'
+        );
+    )");
+    {
+        PGresult* res = PQexec(conn_,
+            "SELECT create_hypertable('bbo','ts_event',"
+            "  if_not_exists => TRUE, migrate_data => TRUE);");
+        if (res) PQclear(res);
+    }
+    {
+        PGresult* r = PQexec(conn_,
+            "CREATE INDEX IF NOT EXISTS idx_bbo_ts ON bbo(ts_event DESC);");
+        if (r) PQclear(r);
+    }
+
+    // ── depth_by_order hypertable — L3 MBO event stream ───────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS depth_by_order (
+            ts_event          TIMESTAMPTZ NOT NULL,
+            source_ns         BIGINT,
+            symbol            VARCHAR(32) NOT NULL DEFAULT 'NQ',
+            exchange          VARCHAR(32) NOT NULL DEFAULT 'CME',
+            sequence_number   BIGINT,
+            update_type       SMALLINT,
+            transaction_type  SMALLINT,
+            depth_price       DOUBLE PRECISION NOT NULL,
+            prev_depth_price  DOUBLE PRECISION,
+            depth_size        INTEGER,
+            exchange_order_id VARCHAR(64),
+            source            VARCHAR(32) DEFAULT 'amp_rithmic'
+        );
+    )");
+    {
+        PGresult* res = PQexec(conn_,
+            "SELECT create_hypertable('depth_by_order','ts_event',"
+            "  if_not_exists => TRUE, migrate_data => TRUE);");
+        if (res) PQclear(res);
+    }
+    {
+        PGresult* r;
+        r = PQexec(conn_,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_depth_unique"
+            " ON depth_by_order(symbol, exchange, source_ns)"
+            " WHERE source_ns IS NOT NULL;");
+        if (r) PQclear(r);
+        r = PQexec(conn_,
+            "CREATE INDEX IF NOT EXISTS idx_depth_ts ON depth_by_order(ts_event DESC);");
+        if (r) PQclear(r);
+    }
+
     // ── Audit log table ────────────────────────────────────────────
     exec(R"(
         CREATE TABLE IF NOT EXISTS audit_log (
@@ -258,7 +323,7 @@ int TickDB::write(const std::vector<TickRow>& rows) {
         "   $6::char[],"
         "   $7::bool[],"
         "   $8::varchar[]"
-        " ) ON CONFLICT (symbol, exchange, ts_event) DO NOTHING";
+        " ) ON CONFLICT (symbol, exchange, ts_event, price, size) DO NOTHING";
 
     const char* params[8] = {
         ts_arr.c_str(), sym_arr.c_str(), exch_arr.c_str(),
@@ -269,6 +334,171 @@ int TickDB::write(const std::vector<TickRow>& rows) {
     PGresult* res = PQexecParams(conn_, sql, 8, nullptr,
                                  params, nullptr, nullptr, 0);
     pg_check(res, "write ticks");
+
+    const char* tag = PQcmdTuples(res);
+    int inserted = tag ? std::atoi(tag) : 0;
+    PQclear(res);
+    return inserted;
+}
+
+// ── write_bbo ─────────────────────────────────────────────────────
+
+int TickDB::write_bbo(const std::vector<BBORow>& rows) {
+    if (rows.empty()) return 0;
+
+    const std::size_t N = rows.size();
+    std::string ts_arr, sym_arr, exch_arr;
+    std::string bid_p_arr, bid_s_arr, bid_o_arr;
+    std::string ask_p_arr, ask_s_arr, ask_o_arr;
+    std::string src_arr;
+
+    ts_arr.reserve(N * 34); sym_arr.reserve(N * 8); exch_arr.reserve(N * 8);
+    bid_p_arr.reserve(N * 12); bid_s_arr.reserve(N * 8); bid_o_arr.reserve(N * 8);
+    ask_p_arr.reserve(N * 12); ask_s_arr.reserve(N * 8); ask_o_arr.reserve(N * 8);
+    src_arr.reserve(N * 16);
+
+    for (std::size_t i = 0; i < N; ++i) {
+        if (i) {
+            ts_arr   += ','; sym_arr  += ','; exch_arr += ',';
+            bid_p_arr+= ','; bid_s_arr+= ','; bid_o_arr+= ',';
+            ask_p_arr+= ','; ask_s_arr+= ','; ask_o_arr+= ',';
+            src_arr  += ',';
+        }
+        ts_arr    += '"' + format_ts(rows[i].ts_micros)  + '"';
+        sym_arr   += '"' + rows[i].symbol   + '"';
+        exch_arr  += '"' + rows[i].exchange + '"';
+        bid_p_arr += std::to_string(rows[i].bid_price);
+        bid_s_arr += std::to_string(rows[i].bid_size);
+        bid_o_arr += std::to_string(rows[i].bid_orders);
+        ask_p_arr += std::to_string(rows[i].ask_price);
+        ask_s_arr += std::to_string(rows[i].ask_size);
+        ask_o_arr += std::to_string(rows[i].ask_orders);
+        src_arr   += "\"amp_rithmic\"";
+    }
+
+    ts_arr    = '{' + ts_arr    + '}';
+    sym_arr   = '{' + sym_arr   + '}';
+    exch_arr  = '{' + exch_arr  + '}';
+    bid_p_arr = '{' + bid_p_arr + '}';
+    bid_s_arr = '{' + bid_s_arr + '}';
+    bid_o_arr = '{' + bid_o_arr + '}';
+    ask_p_arr = '{' + ask_p_arr + '}';
+    ask_s_arr = '{' + ask_s_arr + '}';
+    ask_o_arr = '{' + ask_o_arr + '}';
+    src_arr   = '{' + src_arr   + '}';
+
+    const char* sql =
+        "INSERT INTO bbo"
+        " (ts_event, symbol, exchange, bid_price, bid_size, bid_orders,"
+        "  ask_price, ask_size, ask_orders, source)"
+        " SELECT * FROM unnest("
+        "   $1::timestamptz[],"
+        "   $2::varchar[],"
+        "   $3::varchar[],"
+        "   $4::float8[],"
+        "   $5::int4[],"
+        "   $6::int4[],"
+        "   $7::float8[],"
+        "   $8::int4[],"
+        "   $9::int4[],"
+        "   $10::varchar[]"
+        " ) ON CONFLICT DO NOTHING";
+
+    const char* params[10] = {
+        ts_arr.c_str(), sym_arr.c_str(), exch_arr.c_str(),
+        bid_p_arr.c_str(), bid_s_arr.c_str(), bid_o_arr.c_str(),
+        ask_p_arr.c_str(), ask_s_arr.c_str(), ask_o_arr.c_str(),
+        src_arr.c_str()
+    };
+
+    PGresult* res = PQexecParams(conn_, sql, 10, nullptr,
+                                 params, nullptr, nullptr, 0);
+    pg_check(res, "write bbo");
+
+    const char* tag = PQcmdTuples(res);
+    int inserted = tag ? std::atoi(tag) : 0;
+    PQclear(res);
+    return inserted;
+}
+
+// ── write_depth ────────────────────────────────────────────────────
+
+int TickDB::write_depth(const std::vector<DepthRow>& rows) {
+    if (rows.empty()) return 0;
+
+    const std::size_t N = rows.size();
+    std::string ts_arr, src_ns_arr, sym_arr, exch_arr;
+    std::string seq_arr, upd_arr, txn_arr;
+    std::string dp_arr, pdp_arr, ds_arr, eoid_arr, src_arr;
+
+    ts_arr.reserve(N * 34); sym_arr.reserve(N * 8); exch_arr.reserve(N * 8);
+
+    for (std::size_t i = 0; i < N; ++i) {
+        if (i) {
+            ts_arr    += ','; src_ns_arr+= ','; sym_arr  += ','; exch_arr += ',';
+            seq_arr   += ','; upd_arr   += ','; txn_arr  += ',';
+            dp_arr    += ','; pdp_arr   += ','; ds_arr   += ',';
+            eoid_arr  += ','; src_arr   += ',';
+        }
+        ts_arr     += '"' + format_ts(rows[i].ts_micros) + '"';
+        src_ns_arr += std::to_string(rows[i].source_ns);
+        sym_arr    += '"' + rows[i].symbol   + '"';
+        exch_arr   += '"' + rows[i].exchange + '"';
+        seq_arr    += std::to_string(rows[i].sequence_number);
+        upd_arr    += std::to_string(static_cast<int>(rows[i].update_type));
+        txn_arr    += std::to_string(static_cast<int>(rows[i].transaction_type));
+        dp_arr     += std::to_string(rows[i].depth_price);
+        pdp_arr    += std::to_string(rows[i].prev_depth_price);
+        ds_arr     += std::to_string(rows[i].depth_size);
+        eoid_arr   += '"' + rows[i].exchange_order_id + '"';
+        src_arr    += "\"amp_rithmic\"";
+    }
+
+    ts_arr     = '{' + ts_arr     + '}';
+    src_ns_arr = '{' + src_ns_arr + '}';
+    sym_arr    = '{' + sym_arr    + '}';
+    exch_arr   = '{' + exch_arr   + '}';
+    seq_arr    = '{' + seq_arr    + '}';
+    upd_arr    = '{' + upd_arr    + '}';
+    txn_arr    = '{' + txn_arr    + '}';
+    dp_arr     = '{' + dp_arr     + '}';
+    pdp_arr    = '{' + pdp_arr    + '}';
+    ds_arr     = '{' + ds_arr     + '}';
+    eoid_arr   = '{' + eoid_arr   + '}';
+    src_arr    = '{' + src_arr    + '}';
+
+    const char* sql =
+        "INSERT INTO depth_by_order"
+        " (ts_event, source_ns, symbol, exchange,"
+        "  sequence_number, update_type, transaction_type,"
+        "  depth_price, prev_depth_price, depth_size,"
+        "  exchange_order_id, source)"
+        " SELECT * FROM unnest("
+        "   $1::timestamptz[],"
+        "   $2::int8[],"
+        "   $3::varchar[],"
+        "   $4::varchar[],"
+        "   $5::int8[],"
+        "   $6::int2[],"
+        "   $7::int2[],"
+        "   $8::float8[],"
+        "   $9::float8[],"
+        "   $10::int4[],"
+        "   $11::varchar[],"
+        "   $12::varchar[]"
+        " ) ON CONFLICT (symbol, exchange, source_ns)"
+        "   WHERE source_ns IS NOT NULL DO NOTHING";
+
+    const char* params[12] = {
+        ts_arr.c_str(), src_ns_arr.c_str(), sym_arr.c_str(), exch_arr.c_str(),
+        seq_arr.c_str(), upd_arr.c_str(), txn_arr.c_str(),
+        dp_arr.c_str(), pdp_arr.c_str(), ds_arr.c_str(),
+        eoid_arr.c_str(), src_arr.c_str()
+    };
+
+    PGresult* res = PQexecParams(conn_, sql, 12, nullptr,
+                                 params, nullptr, nullptr, 0);
+    pg_check(res, "write depth");
 
     const char* tag = PQcmdTuples(res);
     int inserted = tag ? std::atoi(tag) : 0;

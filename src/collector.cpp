@@ -34,10 +34,14 @@ Collector::Collector(const Config& cfg) : cfg_(cfg) {
     }
 
     client_ = std::make_unique<RithmicClient>(ioc_, cfg_);
-    client_->set_on_tick([this](TickRow r) { on_tick(std::move(r)); });
+    client_->set_on_tick([this](TickRow r)  { on_tick(std::move(r));  });
+    client_->set_on_bbo([this](BBORow r)    { on_bbo(std::move(r));   });
+    client_->set_on_depth([this](DepthRow r){ on_depth(std::move(r)); });
 
     last_flush_       = std::chrono::steady_clock::now();
     last_audit_flush_ = std::chrono::steady_clock::now();
+    last_bbo_flush_   = std::chrono::steady_clock::now();
+    last_depth_flush_ = std::chrono::steady_clock::now();
 }
 
 Collector::~Collector() { stop(); }
@@ -136,6 +140,86 @@ int Collector::flush() {
     }
 }
 
+// ── on_bbo ─────────────────────────────────────────────────────────
+
+void Collector::on_bbo(BBORow row) {
+    bool need_flush = false;
+    {
+        std::lock_guard lock(bbo_mu_);
+        bbo_buf_.push_back(std::move(row));
+        double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_bbo_flush_).count();
+        need_flush = (static_cast<int>(bbo_buf_.size()) >= BBO_FLUSH_EVERY_N ||
+                      elapsed >= BBO_FLUSH_EVERY_SEC);
+    }
+    if (need_flush) flush_bbo();
+}
+
+// ── flush_bbo ──────────────────────────────────────────────────────
+
+int Collector::flush_bbo() {
+    std::vector<BBORow> batch;
+    {
+        std::lock_guard lock(bbo_mu_);
+        if (bbo_buf_.empty()) return 0;
+        batch.swap(bbo_buf_);
+        last_bbo_flush_ = std::chrono::steady_clock::now();
+    }
+    try {
+        if (!db_->is_connected()) {
+            LOG("  DB disconnected — attempting reconnect...");
+            db_->reconnect();
+        }
+        int n = db_->write_bbo(batch);
+        LOG("  Wrote %d BBO rows", n);
+        return n;
+    } catch (std::exception& e) {
+        LOG("  BBO DB write failed: %s — %zu rows dropped", e.what(), batch.size());
+        audit_->error("bbo.write_error", e.what());
+        return 0;
+    }
+}
+
+// ── on_depth ───────────────────────────────────────────────────────
+
+void Collector::on_depth(DepthRow row) {
+    bool need_flush = false;
+    {
+        std::lock_guard lock(depth_mu_);
+        depth_buf_.push_back(std::move(row));
+        double elapsed = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - last_depth_flush_).count();
+        need_flush = (static_cast<int>(depth_buf_.size()) >= DEPTH_FLUSH_EVERY_N ||
+                      elapsed >= DEPTH_FLUSH_EVERY_SEC);
+    }
+    if (need_flush) flush_depth();
+}
+
+// ── flush_depth ────────────────────────────────────────────────────
+
+int Collector::flush_depth() {
+    std::vector<DepthRow> batch;
+    {
+        std::lock_guard lock(depth_mu_);
+        if (depth_buf_.empty()) return 0;
+        batch.swap(depth_buf_);
+        last_depth_flush_ = std::chrono::steady_clock::now();
+    }
+    try {
+        if (!db_->is_connected()) {
+            LOG("  DB disconnected — attempting reconnect...");
+            db_->reconnect();
+        }
+        int n = db_->write_depth(batch);
+        LOG("  Wrote %d depth rows", n);
+        return n;
+    } catch (std::exception& e) {
+        LOG("  depth DB write failed: %s — %zu rows dropped", e.what(), batch.size());
+        audit_->error("depth.write_error", e.what());
+        return 0;
+    }
+}
+
 // ── status logging ─────────────────────────────────────────────────
 
 void Collector::status_log() {
@@ -184,6 +268,8 @@ void Collector::run() {
     ioc_.run();
 
     flush();
+    flush_bbo();
+    flush_depth();
     audit_->info("collector.stop");
     audit_->flush();
     LOG("Collector stopped.");

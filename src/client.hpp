@@ -53,7 +53,9 @@ using use_awaitable_t = asio::use_awaitable_t<>;
 inline constexpr use_awaitable_t use_awaitable{};
 
 // Callback invoked for every valid tick received
-using TickCallback = std::function<void(TickRow)>;
+using TickCallback  = std::function<void(TickRow)>;
+using BBOCallback   = std::function<void(BBORow)>;
+using DepthCallback = std::function<void(DepthRow)>;
 
 // Rithmic WebSocket client (ticker plant only — data collection).
 //
@@ -71,8 +73,10 @@ public:
 
     explicit RithmicClient(asio::io_context& ioc, const Config& cfg);
 
-    // Set the callback invoked for each tick
-    void set_on_tick(TickCallback cb) { on_tick_ = std::move(cb); }
+    // Set the callback invoked for each tick / BBO / depth event
+    void set_on_tick(TickCallback cb)   { on_tick_  = std::move(cb); }
+    void set_on_bbo(BBOCallback cb)     { on_bbo_   = std::move(cb); }
+    void set_on_depth(DepthCallback cb) { on_depth_ = std::move(cb); }
 
     // Run the connection + reconnection loop (runs until stop() is called)
     asio::awaitable<void> run();
@@ -95,6 +99,9 @@ private:
     asio::awaitable<void> subscribe(WsStream& ws,
                                     const std::string& symbol,
                                     const std::string& exchange);
+    asio::awaitable<void> subscribe_depth(WsStream& ws,
+                                          const std::string& symbol,
+                                          const std::string& exchange);
     asio::awaitable<void> unsubscribe(WsStream& ws,
                                       const std::string& symbol,
                                       const std::string& exchange);
@@ -128,6 +135,8 @@ private:
     ssl::context       ssl_ctx_;
     Config             cfg_;
     TickCallback       on_tick_;
+    BBOCallback        on_bbo_;
+    DepthCallback      on_depth_;
     double             heartbeat_interval_ = 30.0;
     std::atomic<bool>  running_{true};
 };

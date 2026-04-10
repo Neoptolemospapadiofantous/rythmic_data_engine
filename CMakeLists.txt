@@ -63,8 +63,13 @@ add_executable(test_connection tests/test_connection.cpp)
 target_link_libraries(test_connection PRIVATE rithmic_lib)
 target_include_directories(test_connection PRIVATE src/)
 
+add_executable(test_validator tests/test_validator.cpp)
+target_link_libraries(test_validator PRIVATE rithmic_lib)
+target_include_directories(test_validator PRIVATE src/)
+
 enable_testing()
-add_test(NAME db_tests COMMAND test_db)
+add_test(NAME db_tests        COMMAND test_db)
+add_test(NAME validator_tests COMMAND test_validator)
 
 # ── Dashboard (ncurses TUI) ────────────────────────────────────────
 add_executable(dashboard src/dashboard.cpp)

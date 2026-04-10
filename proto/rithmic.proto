@@ -121,3 +121,42 @@ message LastTrade {
     SELL = 2;
   }
 }
+
+// ── Template 151 — Best Bid / Offer (top of book) ─────────────────
+
+message BestBidOffer {
+  int32  template_id   = 154467;
+  string symbol        = 110100;
+  string exchange      = 110101;
+  int32  presence_bits = 149138;
+  double bid_price     = 154277;
+  int32  bid_size      = 154273;
+  int32  bid_orders    = 154305;
+  double ask_price     = 154278;
+  int32  ask_size      = 154274;
+  int32  ask_orders    = 154306;
+  int32  ssboe         = 150100;
+  int32  usecs         = 150101;
+}
+
+// ── Template 160 — Depth By Order (L3 MBO stream) ─────────────────
+
+message DepthByOrder {
+  int32  template_id            = 154467;
+  string symbol                 = 110100;
+  string exchange               = 110101;
+  int64  sequence_number        = 154110;
+  int32  update_type            = 154111;   // 1=NEW, 2=CHANGE, 3=DELETE
+  int32  transaction_type       = 154112;   // 1=BUY, 2=SELL
+  double depth_price            = 154113;
+  double prev_depth_price       = 154114;
+  bool   prev_depth_price_flag  = 154115;
+  int32  depth_size             = 154116;
+  int32  depth_order_priority   = 154117;
+  string exchange_order_id      = 154118;
+  int32  ssboe                  = 150100;
+  int32  usecs                  = 150101;
+  int32  source_ssboe           = 150635;
+  int32  source_usecs           = 150636;
+  int32  source_nsecs           = 150637;
+}

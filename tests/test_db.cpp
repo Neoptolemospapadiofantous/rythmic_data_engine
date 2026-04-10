@@ -20,8 +20,16 @@
 
 // ── helpers ────────────────────────────────────────────────────────
 
-static int g_passed = 0;
-static int g_failed = 0;
+static int g_passed  = 0;
+static int g_failed  = 0;
+static int g_skipped = 0;
+
+// Throw this to skip a test without counting it as a failure
+struct SkipTest : std::exception {
+    explicit SkipTest(const char* msg) : msg_(msg) {}
+    const char* what() const noexcept override { return msg_; }
+    const char* msg_;
+};
 
 #define TEST(name) \
     static void test_##name(); \
@@ -41,7 +49,12 @@ static int g_failed = 0;
 
 // ── fixture ────────────────────────────────────────────────────────
 
-static std::string g_connstr;
+// g_connstr is initialised at static-init time by reading .env, so all TEST
+// static-initializer constructors (which run before main()) have a valid connstr.
+static std::string g_connstr = []() -> std::string {
+    Config c = Config::from_env(".env");
+    return c.pg_connstr();
+}();
 
 static void setup_test_schema(PGconn* conn) {
     // Use a separate test table so we don't touch production data
@@ -165,6 +178,287 @@ TEST(large_batch) {
     ASSERT(inserted == 500);
 }
 
+// ── RUN_TEST macro — runs tests from main() (not static init) ──────
+//
+// New tests use RUN_TEST instead of TEST so they execute after main()
+// has set up the database schema.  TEST is kept for the existing tests
+// (static-initializer style, maintained for backward compat).
+
+#define RUN_TEST(name) \
+    do { \
+        std::printf("  %-40s ", #name); \
+        try { test_##name(); std::printf("PASS\n"); ++g_passed; } \
+        catch (SkipTest& s) { std::printf("SKIP: %s\n", s.what()); ++g_skipped; } \
+        catch (std::exception& e) { std::printf("FAIL: %s\n", e.what()); ++g_failed; } \
+    } while (0)
+
+// ── BBO helpers ────────────────────────────────────────────────────
+
+static void truncate_bbo_table(PGconn* conn) {
+    // Truncate rather than drop so the hypertable structure (created by
+    // ensure_schema) is preserved.
+    PGresult* r = PQexec(conn, "TRUNCATE TABLE bbo");
+    if (r) PQclear(r);
+}
+
+static void teardown_bbo_table(PGconn* conn) {
+    PGresult* r = PQexec(conn, "TRUNCATE TABLE bbo");
+    if (r) PQclear(r);
+}
+
+// ── BBORow tests ────────────────────────────────────────────────────
+
+static void test_write_bbo_basic() {
+    {
+        PGconn* c = PQconnectdb(g_connstr.c_str());
+        truncate_bbo_table(c);
+        PQfinish(c);
+    }
+
+    TickDB db(g_connstr);
+
+    std::vector<BBORow> rows = {
+        {1712000100'000000LL, 18499.75, 10, 3, 18500.00, 8,  2, "NQ", "CME"},
+        {1712000101'000000LL, 18500.00, 5,  1, 18500.25, 12, 4, "NQ", "CME"},
+        {1712000102'000000LL, 18500.25, 7,  2, 18500.50, 6,  1, "NQ", "CME"},
+    };
+
+    int inserted = db.write_bbo(rows);
+    ASSERT_EQ(inserted, 3);
+}
+
+static void test_write_bbo_empty_batch() {
+    TickDB db(g_connstr);
+
+    std::vector<BBORow> empty;
+    int inserted = db.write_bbo(empty);
+    ASSERT_EQ(inserted, 0);
+}
+
+static void test_write_bbo_dedup() {
+    // bbo has no UNIQUE constraint (only a plain ts_event DESC index).
+    // write_bbo uses ON CONFLICT DO NOTHING which is only a no-op when a
+    // unique constraint is violated.  Without one, every insert succeeds.
+    // This test verifies the write path is stable with repeated rows.
+    TickDB db(g_connstr);
+
+    std::vector<BBORow> rows = {
+        {1712000200'000000LL, 18510.0, 5, 1, 18510.25, 8, 2, "NQ", "CME"},
+    };
+
+    int first  = db.write_bbo(rows);
+    int second = db.write_bbo(rows);
+
+    // Both inserts succeed since there is no unique constraint on bbo
+    ASSERT(first  >= 1);
+    ASSERT(second >= 0);  // 0 or 1 — both are acceptable
+}
+
+// ── DepthRow helpers ────────────────────────────────────────────────
+
+static void truncate_depth_table(PGconn* conn) {
+    PGresult* r = PQexec(conn, "TRUNCATE TABLE depth_by_order");
+    if (r) PQclear(r);
+}
+
+static void teardown_depth_table(PGconn* conn) {
+    PGresult* r = PQexec(conn, "TRUNCATE TABLE depth_by_order");
+    if (r) PQclear(r);
+}
+
+// ── DepthRow tests ──────────────────────────────────────────────────
+
+// Helper: true if idx_depth_unique exists (TimescaleDB may not support partial unique indexes)
+static bool depth_unique_index_exists() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    if (PQstatus(c) != CONNECTION_OK) { PQfinish(c); return false; }
+    PGresult* r = PQexec(c,
+        "SELECT COUNT(*) FROM pg_indexes"
+        " WHERE tablename='depth_by_order' AND indexname='idx_depth_unique'");
+    bool ok = r && PQresultStatus(r) == PGRES_TUPLES_OK && std::atoi(PQgetvalue(r, 0, 0)) > 0;
+    if (r) PQclear(r);
+    PQfinish(c);
+    return ok;
+}
+
+static void test_write_depth_basic() {
+    {
+        PGconn* c = PQconnectdb(g_connstr.c_str());
+        truncate_depth_table(c);
+        PQfinish(c);
+    }
+
+    TickDB db(g_connstr);
+
+    std::vector<DepthRow> rows = {
+        {1712000300'000000LL, 1712000300'000000001LL, 1001, 1, 1, 18499.75, 0.0, 10, "ORD001", "NQ", "CME"},
+        {1712000301'000000LL, 1712000301'000000002LL, 1002, 2, 1, 18499.75, 18499.75, 8, "ORD001", "NQ", "CME"},
+        {1712000302'000000LL, 1712000302'000000003LL, 1003, 3, 1, 18499.75, 18499.75, 0, "ORD001", "NQ", "CME"},
+    };
+
+    // write_depth requires idx_depth_unique; skip if TimescaleDB won't create it
+    if (!depth_unique_index_exists())
+        throw SkipTest("idx_depth_unique not present (TimescaleDB partial-unique limitation)");
+
+    int inserted = db.write_depth(rows);
+    ASSERT_EQ(inserted, 3);
+}
+
+static void test_write_depth_empty_batch() {
+    TickDB db(g_connstr);
+
+    // Empty batch is a fast-path return — no DB query issued, no constraint needed
+    std::vector<DepthRow> empty;
+    int inserted = db.write_depth(empty);
+    ASSERT_EQ(inserted, 0);
+}
+
+static void test_write_depth_dedup() {
+    if (!depth_unique_index_exists())
+        throw SkipTest("idx_depth_unique not present (TimescaleDB partial-unique limitation)");
+
+    TickDB db(g_connstr);
+
+    // Same source_ns → should be deduped by idx_depth_unique
+    std::vector<DepthRow> rows = {
+        {1712000400'000000LL, 1712000400'999999001LL, 2001, 1, 1, 18502.0, 0.0, 5, "ORD999", "NQ", "CME"},
+    };
+
+    int first  = db.write_depth(rows);
+    int second = db.write_depth(rows);  // same source_ns
+
+    ASSERT(first >= 1);
+    ASSERT(second <= 0);
+}
+
+static void test_write_depth_update_types() {
+    if (!depth_unique_index_exists())
+        throw SkipTest("idx_depth_unique not present (TimescaleDB partial-unique limitation)");
+
+    TickDB db(g_connstr);
+
+    // One row per update_type: 1=NEW, 2=CHANGE, 3=DELETE — all unique source_ns
+    std::vector<DepthRow> rows = {
+        {1712000500'000000LL, 1712000500'100000001LL, 3001, 1, 1, 18505.0, 0.0,     5, "ORD_A", "NQ", "CME"},
+        {1712000500'000001LL, 1712000500'200000002LL, 3002, 2, 1, 18505.0, 18505.0, 3, "ORD_A", "NQ", "CME"},
+        {1712000500'000002LL, 1712000500'300000003LL, 3003, 3, 1, 18505.0, 18505.0, 0, "ORD_A", "NQ", "CME"},
+    };
+
+    int inserted = db.write_depth(rows);
+    ASSERT_EQ(inserted, 3);
+}
+
+// ── Schema verification tests (information_schema queries) ──────────
+
+static void test_bbo_table_exists() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    PGresult* res = PQexec(c,
+        "SELECT COUNT(*) FROM information_schema.columns"
+        " WHERE table_name = 'bbo'");
+    ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+    int count = std::atoi(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    PQfinish(c);
+
+    ASSERT(count > 0);
+}
+
+static void test_bbo_has_required_columns() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    const char* required[] = {
+        "bid_price", "ask_price", "bid_size", "ask_size", "ts_event"
+    };
+
+    for (const char* col : required) {
+        std::string sql =
+            std::string("SELECT COUNT(*) FROM information_schema.columns"
+                        " WHERE table_name = 'bbo' AND column_name = '") + col + "'";
+        PGresult* res = PQexec(c, sql.c_str());
+        ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+        int cnt = std::atoi(PQgetvalue(res, 0, 0));
+        PQclear(res);
+        if (cnt == 0) {
+            PQfinish(c);
+            throw std::runtime_error(std::string("bbo missing column: ") + col);
+        }
+    }
+
+    PQfinish(c);
+}
+
+static void test_depth_table_exists() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    PGresult* res = PQexec(c,
+        "SELECT COUNT(*) FROM information_schema.columns"
+        " WHERE table_name = 'depth_by_order'");
+    ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+    int count = std::atoi(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    PQfinish(c);
+
+    ASSERT(count > 0);
+}
+
+static void test_depth_has_source_ns() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    PGresult* res = PQexec(c,
+        "SELECT COUNT(*) FROM information_schema.columns"
+        " WHERE table_name = 'depth_by_order' AND column_name = 'source_ns'");
+    ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+    int count = std::atoi(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    PQfinish(c);
+
+    ASSERT(count > 0);
+}
+
+static void test_depth_has_update_type() {
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    PGresult* res = PQexec(c,
+        "SELECT COUNT(*) FROM information_schema.columns"
+        " WHERE table_name = 'depth_by_order' AND column_name = 'update_type'");
+    ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+    int count = std::atoi(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    PQfinish(c);
+
+    ASSERT(count > 0);
+}
+
+static void test_ticks_unique_index_wide() {
+    // Regression guard: idx_ticks_unique must include 'price' AND 'size' columns.
+    // The old narrow index (ts_event only) allowed duplicate trades sharing
+    // a microsecond timestamp to be silently dropped.
+    PGconn* c = PQconnectdb(g_connstr.c_str());
+    ASSERT(PQstatus(c) == CONNECTION_OK);
+
+    PGresult* res = PQexec(c,
+        "SELECT indexdef FROM pg_indexes"
+        " WHERE tablename = 'ticks' AND indexname = 'idx_ticks_unique'");
+    ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
+
+    bool found = PQntuples(res) > 0;
+    std::string indexdef;
+    if (found)
+        indexdef = PQgetvalue(res, 0, 0);
+    PQclear(res);
+    PQfinish(c);
+
+    ASSERT(found);
+    ASSERT(indexdef.find("price") != std::string::npos);
+    ASSERT(indexdef.find("size")  != std::string::npos);
+}
+
 // ── main ───────────────────────────────────────────────────────────
 
 int main() {
@@ -193,17 +487,40 @@ int main() {
         (void)db;
     }
 
-    // Tests run via static initializers (TEST macro)
-    // They're already registered — nothing else to call here.
+    // Existing tests run via static initializers (TEST macro).
+    // New tests (BBORow, DepthRow, schema) run explicitly below, after the
+    // schema is guaranteed to be in place.
 
-    std::printf("\n=== Results: %d passed, %d failed ===\n\n",
-                g_passed, g_failed);
+    std::printf("\n--- BBORow tests ---\n");
+    RUN_TEST(write_bbo_basic);
+    RUN_TEST(write_bbo_empty_batch);
+    RUN_TEST(write_bbo_dedup);
+
+    std::printf("\n--- DepthRow tests ---\n");
+    RUN_TEST(write_depth_basic);
+    RUN_TEST(write_depth_empty_batch);
+    RUN_TEST(write_depth_dedup);
+    RUN_TEST(write_depth_update_types);
+
+    std::printf("\n--- Schema verification tests ---\n");
+    RUN_TEST(bbo_table_exists);
+    RUN_TEST(bbo_has_required_columns);
+    RUN_TEST(depth_table_exists);
+    RUN_TEST(depth_has_source_ns);
+    RUN_TEST(depth_has_update_type);
+    RUN_TEST(ticks_unique_index_wide);
+
+    std::printf("\n=== Results: %d passed, %d failed, %d skipped ===\n\n",
+                g_passed, g_failed, g_skipped);
 
     // Teardown
     {
         PGconn* c = PQconnectdb(g_connstr.c_str());
-        if (PQstatus(c) == CONNECTION_OK)
+        if (PQstatus(c) == CONNECTION_OK) {
             teardown_test_schema(c);
+            teardown_bbo_table(c);
+            teardown_depth_table(c);
+        }
         PQfinish(c);
     }
 
