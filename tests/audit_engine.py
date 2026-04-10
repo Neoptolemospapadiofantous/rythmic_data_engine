@@ -303,21 +303,32 @@ def check_data_health(conn) -> bool:
     cur = conn.cursor()
 
     # ticks — use pg_class estimate (fast, within 1-2% on 270M rows; exact COUNT would take minutes)
-    cur.execute("""
-        SELECT reltuples::bigint,
-               (SELECT MIN(ts_event)::text FROM ticks WHERE ts_event IS NOT NULL LIMIT 1),
-               (SELECT MAX(ts_event)::text FROM ticks WHERE ts_event > now() - interval '30 days')
-        FROM pg_class WHERE relname = 'ticks'
-    """)
-    row = cur.fetchone()
-    tick_count, tick_min, tick_max = row
-    # 100M+ rows = healthy full dataset; <10M = suspicious (re-migration in progress or data lost)
-    TICKS_WARN_THRESHOLD = 100_000_000
-    ticks_status = PASS if tick_count >= TICKS_WARN_THRESHOLD else (WARN if tick_count > 0 else FAIL)
-    result("  ticks total rows (approx)", ticks_status,
-           f"~{tick_count:,}" + (" — below 100M, re-migration may be needed" if ticks_status == WARN else ""))
-    ok = ok and ticks_status != FAIL
-    if tick_count > 0:
+    # reltuples = -1 means ANALYZE has never run (fresh bulk-loaded table) — fall back to EXISTS check
+    cur.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'ticks'")
+    tick_count = cur.fetchone()[0]
+    if tick_count == -1:
+        # Table unanalyzed — verify it has data with a cheap EXISTS, report WARN to run ANALYZE
+        cur.execute("SELECT EXISTS (SELECT 1 FROM ticks LIMIT 1)")
+        has_data = cur.fetchone()[0]
+        tick_count = 0 if not has_data else -1
+        if has_data:
+            result("  ticks total rows (approx)", WARN,
+                   "unanalyzed — run 'ANALYZE ticks' for accurate count (~270M expected)")
+        else:
+            result("  ticks total rows (approx)", FAIL, "table empty")
+            ok = False
+    else:
+        TICKS_WARN_THRESHOLD = 100_000_000
+        ticks_status = PASS if tick_count >= TICKS_WARN_THRESHOLD else (WARN if tick_count > 0 else FAIL)
+        result("  ticks total rows (approx)", ticks_status,
+               f"~{tick_count:,}" + (" — below 100M, re-migration may be needed" if ticks_status == WARN else ""))
+        ok = ok and ticks_status != FAIL
+
+    if tick_count != 0:
+        cur.execute("SELECT MIN(ts_event)::text FROM ticks LIMIT 1")
+        tick_min = cur.fetchone()[0]
+        cur.execute("SELECT MAX(ts_event)::text FROM ticks WHERE ts_event > now() - interval '30 days'")
+        tick_max = cur.fetchone()[0]
         result("  ticks date range", INFO, f"{tick_min or '?'}  →  {tick_max or '?'}")
 
     # bbo — small table, exact count is fine
