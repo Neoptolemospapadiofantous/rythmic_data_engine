@@ -17,12 +17,15 @@ namespace asio = boost::asio;
 
 class Collector {
 public:
-    static constexpr int    FLUSH_EVERY_N       = 200;
-    static constexpr double FLUSH_EVERY_SEC     = 30.0;
-    static constexpr int    BBO_FLUSH_EVERY_N   = 500;
-    static constexpr double BBO_FLUSH_EVERY_SEC = 5.0;
-    static constexpr int    DEPTH_FLUSH_EVERY_N   = 500;
-    static constexpr double DEPTH_FLUSH_EVERY_SEC = 5.0;
+    // Flush thresholds — tuned for minimum PG write latency.
+    // Low N: write small batches often so PG data stays fresh.
+    // Low SEC: time-based fallback for quiet markets.
+    static constexpr int    FLUSH_EVERY_N         = 20;
+    static constexpr double FLUSH_EVERY_SEC       = 1.0;
+    static constexpr int    BBO_FLUSH_EVERY_N     = 20;
+    static constexpr double BBO_FLUSH_EVERY_SEC   = 1.0;
+    static constexpr int    DEPTH_FLUSH_EVERY_N   = 50;
+    static constexpr double DEPTH_FLUSH_EVERY_SEC = 1.0;
 
     explicit Collector(const Config& cfg);
     ~Collector();

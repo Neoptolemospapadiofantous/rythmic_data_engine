@@ -3,6 +3,9 @@
 #include <cstring>
 #include <string>
 
+#include <sched.h>
+#include <sys/resource.h>
+
 #include "audit.hpp"
 #include "collector.hpp"
 #include "config.hpp"
@@ -109,6 +112,12 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "Copy .env.example to .env and fill in credentials.\n");
         return 1;
     }
+
+    // ── Latency tuning ─────────────────────────────────────────────
+    // Raise process priority so the OS scheduler preempts us less.
+    // setpriority(-20) = highest nice level; fails silently if unprivileged.
+    if (setpriority(PRIO_PROCESS, 0, -10) != 0)
+        std::fprintf(stderr, "Note: could not set process priority (run as root for -20)\n");
 
     Collector collector(cfg);
     g_collector = &collector;

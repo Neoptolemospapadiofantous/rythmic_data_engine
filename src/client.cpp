@@ -55,6 +55,16 @@ RithmicClient::connect_ws() {
     // TCP connect
     co_await beast::get_lowest_layer(*ws).async_connect(results, use_awaitable);
 
+    // TCP_NODELAY — disable Nagle's algorithm so small frames go out immediately
+    // instead of being buffered for up to 40ms waiting for more data.
+    // SO_RCVBUF/SO_SNDBUF — bump kernel socket buffers to absorb tick bursts.
+    {
+        auto& sock = beast::get_lowest_layer(*ws).socket();
+        sock.set_option(asio::ip::tcp::no_delay(true));
+        sock.set_option(asio::socket_base::receive_buffer_size(1 << 20));  // 1 MB
+        sock.set_option(asio::socket_base::send_buffer_size(256 << 10));   // 256 KB
+    }
+
     // SNI
     if (!SSL_set_tlsext_host_name(ws->next_layer().native_handle(), host.c_str()))
         throw std::runtime_error("SSL_set_tlsext_host_name failed");
