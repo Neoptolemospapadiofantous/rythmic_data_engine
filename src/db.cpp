@@ -102,14 +102,12 @@ void TickDB::ensure_schema() {
         if (res) PQclear(res);
     }
 
-    // Unique index: (symbol, exchange, ts_event, price, size) — preserves all
-    // real distinct trades that share a microsecond timestamp (e.g. Databento ns
-    // data floored to µs for TIMESTAMPTZ storage).  Old narrower indexes dropped.
+    // Unique index: (symbol, exchange, ts_event, price, size).
+    // IF NOT EXISTS makes this a no-op on every normal startup — only builds
+    // the index the very first time (or after explicit DROP).
+    // Old narrower legacy index (3-col) dropped once on first run.
     {
-        PGresult* r;
-        r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_ts_unique;");
-        if (r) PQclear(r);
-        r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_unique;");
+        PGresult* r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_ts_unique;");
         if (r) PQclear(r);
     }
     exec(R"(
