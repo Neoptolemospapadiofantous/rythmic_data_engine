@@ -302,43 +302,37 @@ def check_data_health(conn) -> bool:
     ok = True
     cur = conn.cursor()
 
-    # ticks
-    cur.execute("SELECT COUNT(*), MIN(ts_event)::text, MAX(ts_event)::text FROM ticks")
+    # ticks — use pg_class estimate (fast, within 1-2% on 270M rows; exact COUNT would take minutes)
+    cur.execute("""
+        SELECT reltuples::bigint,
+               (SELECT MIN(ts_event)::text FROM ticks WHERE ts_event IS NOT NULL LIMIT 1),
+               (SELECT MAX(ts_event)::text FROM ticks WHERE ts_event > now() - interval '30 days')
+        FROM pg_class WHERE relname = 'ticks'
+    """)
     row = cur.fetchone()
     tick_count, tick_min, tick_max = row
     # 100M+ rows = healthy full dataset; <10M = suspicious (re-migration in progress or data lost)
     TICKS_WARN_THRESHOLD = 100_000_000
     ticks_status = PASS if tick_count >= TICKS_WARN_THRESHOLD else (WARN if tick_count > 0 else FAIL)
-    result("  ticks total rows", ticks_status,
-           f"{tick_count:,}" + (" — below 100M, re-migration may be needed" if ticks_status == WARN else ""))
+    result("  ticks total rows (approx)", ticks_status,
+           f"~{tick_count:,}" + (" — below 100M, re-migration may be needed" if ticks_status == WARN else ""))
     ok = ok and ticks_status != FAIL
     if tick_count > 0:
-        result("  ticks date range", INFO, f"{tick_min}  →  {tick_max}")
+        result("  ticks date range", INFO, f"{tick_min or '?'}  →  {tick_max or '?'}")
 
-        cur.execute(
-            "SELECT is_buy, COUNT(*) FROM ticks GROUP BY is_buy"
-        )
-        sides = {r[0]: r[1] for r in cur.fetchall()}
-        buys  = sides.get(True, 0)
-        sells = sides.get(False, 0)
-        total = buys + sells
-        if total > 0:
-            ratio = buys / total * 100
-            result("  ticks buy ratio", INFO, f"{ratio:.1f}%  ({buys:,} buy / {sells:,} sell)")
-
-    # bbo
+    # bbo — small table, exact count is fine
     cur.execute("SELECT COUNT(*) FROM bbo")
     bbo_count = cur.fetchone()[0]
     result("  bbo total rows",
            PASS if bbo_count > 0 else WARN,
            f"{bbo_count:,}" if bbo_count > 0 else "0 — BBO collection not started yet")
 
-    # depth_by_order
-    cur.execute("SELECT COUNT(*) FROM depth_by_order")
+    # depth_by_order — use estimate too (can grow large)
+    cur.execute("SELECT reltuples::bigint FROM pg_class WHERE relname = 'depth_by_order'")
     depth_count = cur.fetchone()[0]
-    result("  depth_by_order total rows",
+    result("  depth_by_order total rows (approx)",
            PASS if depth_count > 0 else WARN,
-           f"{depth_count:,}" if depth_count > 0 else "0 — depth collection not started yet")
+           f"~{depth_count:,}" if depth_count > 0 else "0 — depth collection not started yet")
 
     # audit_log
     cur.execute("SELECT COUNT(*), MAX(ts)::text FROM audit_log")
