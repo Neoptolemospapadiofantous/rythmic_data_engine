@@ -139,4 +139,5 @@ private:
     DepthCallback      on_depth_;
     double             heartbeat_interval_ = 30.0;
     std::atomic<bool>  running_{true};
+    std::atomic<bool>  hb_response_pending_{false}; // set by dispatch_message on template 18
 };

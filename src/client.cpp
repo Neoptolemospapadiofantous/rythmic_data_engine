@@ -463,7 +463,11 @@ void RithmicClient::dispatch_message(const std::string& payload) {
                                dbo.symbol().empty()   ? cfg_.symbol   : dbo.symbol(),
                                dbo.exchange().empty()  ? cfg_.exchange : dbo.exchange()});
     }
-    // template_id 19 = ResponseHeartbeat — silently ignored
+    } else if (base.template_id() == 18) {
+        // RequestHeartbeat from Rithmic — we must respond with ResponseHeartbeat (19)
+        hb_response_pending_.store(true);
+    }
+    // template_id 19 = ResponseHeartbeat (our own replies echoed back) — ignored
     // template_id 101 = ResponseMarketDataUpdate — silently ignored
 }
 
@@ -493,6 +497,9 @@ asio::awaitable<void> RithmicClient::receive_loop(WsStream& ws) {
             // A WS message arrived first
             if (read_ec) throw beast::system_error(read_ec);
             dispatch_message(strip_header(beast::buffers_to_string(buf.data())));
+            // Respond to any RequestHeartbeat (template 18) sent to us by Rithmic
+            if (hb_response_pending_.exchange(false))
+                co_await send_heartbeat(ws);
         } else {
             // Heartbeat timer fired first
             if (timer_ec == asio::error::operation_aborted) break;
