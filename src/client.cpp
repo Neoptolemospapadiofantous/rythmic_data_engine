@@ -462,7 +462,6 @@ void RithmicClient::dispatch_message(const std::string& payload) {
                                dbo.depth_size(), dbo.exchange_order_id(),
                                dbo.symbol().empty()   ? cfg_.symbol   : dbo.symbol(),
                                dbo.exchange().empty()  ? cfg_.exchange : dbo.exchange()});
-    }
     } else if (base.template_id() == 18) {
         // RequestHeartbeat from Rithmic — we must respond with ResponseHeartbeat (19)
         hb_response_pending_.store(true);
