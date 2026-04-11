@@ -394,8 +394,8 @@ def check_python_data(conn) -> bool:
 
     try:
         import warnings
-        import pandas as pd
         warnings.filterwarnings("ignore", category=UserWarning, module="pandas")
+        import pandas as pd
     except ImportError:
         result("  pandas importable", WARN, "pip install pandas — skipping section")
         return True  # not a hard failure
