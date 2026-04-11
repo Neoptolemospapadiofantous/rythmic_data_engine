@@ -378,9 +378,102 @@ def check_data_health(conn) -> bool:
     return ok
 
 
-# ── section 6: config validation ───────────────────────────────────
+# ── section 6: python data readability ────────────────────────────
+def check_python_data(conn) -> bool:
+    """Verify Python (pandas) can read ticks from PG and that data is sane."""
+    section("6. Python Data Readability")
+    ok = True
+
+    try:
+        import pandas as pd
+    except ImportError:
+        result("  pandas importable", WARN, "pip install pandas — skipping section")
+        return True  # not a hard failure
+
+    result("  pandas importable", PASS)
+
+    # ── pull a sample of recent ticks into a DataFrame ────────────────
+    try:
+        df = pd.read_sql(
+            "SELECT ts_event, price, size, is_buy FROM ticks "
+            "ORDER BY ts_event DESC LIMIT 1000",
+            conn,
+        )
+        result("  pd.read_sql ticks (1000 rows)", PASS, f"{len(df)} rows loaded")
+    except Exception as e:
+        result("  pd.read_sql ticks", FAIL, str(e))
+        return False
+
+    if df.empty:
+        result("  DataFrame non-empty", FAIL, "no rows returned")
+        return False
+
+    # ── column presence ───────────────────────────────────────────────
+    for col in ("ts_event", "price", "size", "is_buy"):
+        present = col in df.columns
+        result(f"  column '{col}' present", PASS if present else FAIL)
+        if not present:
+            ok = False
+
+    if not ok:
+        return False
+
+    # ── NQ price sanity (15 000 – 50 000) ────────────────────────────
+    pmin, pmax = float(df["price"].min()), float(df["price"].max())
+    price_ok = 15_000 < pmin and pmax < 50_000
+    result("  price range sanity (15k–50k)",
+           PASS if price_ok else FAIL,
+           f"min={pmin:.2f}  max={pmax:.2f}")
+    if not price_ok:
+        ok = False
+
+    # ── size sanity (1 – 50 000) ──────────────────────────────────────
+    size_ok = int(df["size"].min()) >= 1 and int(df["size"].max()) <= 50_000
+    result("  size range sanity (1–50k)",
+           PASS if size_ok else FAIL,
+           f"min={int(df['size'].min())}  max={int(df['size'].max())}")
+    if not size_ok:
+        ok = False
+
+    # ── buy/sell ratio (40–60% buys expected on NQ) ──────────────────
+    buy_pct = float(df["is_buy"].mean()) * 100
+    ratio_ok = 30 <= buy_pct <= 70
+    result("  buy/sell ratio (30–70% buys)",
+           PASS if ratio_ok else WARN,
+           f"{buy_pct:.1f}% buys in last 1000 ticks")
+
+    # ── data freshness (last tick within 3 trading days) ─────────────
+    import datetime
+    latest = pd.to_datetime(df["ts_event"].max(), utc=True)
+    now_utc = pd.Timestamp.now(tz="UTC")
+    age_hours = (now_utc - latest).total_seconds() / 3600
+    # NQ closes for ~1h/day + ~48h weekend, so 72h covers Mon open after weekend
+    fresh = age_hours < 72
+    result("  data freshness (last tick < 72h old)",
+           PASS if fresh else WARN,
+           f"{age_hours:.1f}h ago  ({latest.strftime('%Y-%m-%d %H:%M UTC')})")
+
+    # ── timestamp dtype is datetime ───────────────────────────────────
+    is_dt = pd.api.types.is_datetime64_any_dtype(df["ts_event"])
+    result("  ts_event parsed as datetime",
+           PASS if is_dt else WARN,
+           str(df["ts_event"].dtype))
+
+    # ── oldest tick in full table (date range check) ──────────────────
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT MIN(ts_event)::text FROM ticks LIMIT 1")
+        oldest = cur.fetchone()[0]
+        result("  oldest tick in DB", INFO, oldest or "n/a")
+    except Exception:
+        pass
+
+    return ok
+
+
+# ── section 7: config validation ───────────────────────────────────
 def check_config() -> bool:
-    section("6. Config Validation (.env)")
+    section("7. Config Validation (.env)")
     ok = True
 
     if not ENV_FILE.exists():
@@ -454,12 +547,13 @@ def main():
     results["build"]  = check_build()
     results["source"] = check_source_invariants()
     results["proto"]  = check_proto()
-    results["config"] = check_config()
 
     if args.no_pg:
         results["schema"] = None
         results["data"]   = None
-        print(f"\n  {INFO}  Skipping sections 4+5 (--no-pg)")
+        results["pydata"] = None
+        results["config"] = check_config()
+        print(f"\n  {INFO}  Skipping sections 4+6 (--no-pg)")
     else:
         conn = None
         try:
@@ -476,19 +570,23 @@ def main():
 
         if conn is not None:
             try:
-                results["schema"] = check_schema(conn)
-                results["data"]   = check_data_health(conn)
+                results["schema"]  = check_schema(conn)
+                results["data"]    = check_data_health(conn)
+                results["pydata"]  = check_python_data(conn)
             finally:
                 conn.close()
 
+    results["config"] = check_config()
+
     # ── summary ───────────────────────────────────────────────────
-    section("7. Summary")
+    section("8. Summary")
     labels = {
         "build":  "Build integrity",
         "source": "Source invariants",
         "proto":  "Proto integrity",
         "schema": "PostgreSQL schema",
         "data":   "Data health",
+        "pydata": "Python data readability",
         "config": "Config validation",
     }
 
