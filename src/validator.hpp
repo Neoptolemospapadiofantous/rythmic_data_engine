@@ -9,7 +9,9 @@
 //   price  — finite, > 0, < 1 000 000  (NQ all-time high ~22 000)
 //   size   — integer, 1 … 50 000       (50k contracts is implausibly large)
 //   ts     — µs since epoch, > 0,
-//             within ±1 hour of system clock (catches stale/buggy timestamps)
+//             within ±12 hours of system clock (Rithmic replays buffered ticks
+//             from earlier in the session on reconnect; the unique index on
+//             (symbol,exchange,ts_event,price,size) prevents true duplicates)
 //   symbol — non-empty, ≤ 32 chars, printable ASCII
 //   exchange — non-empty, ≤ 32 chars, printable ASCII
 
@@ -22,7 +24,7 @@
 
 struct TickValidator {
 
-    static constexpr int64_t MAX_DRIFT_US   = 3'600'000'000LL;  // 1 hour
+    static constexpr int64_t MAX_DRIFT_US   = 43'200'000'000LL; // 12 hours
     static constexpr double  MAX_PRICE      = 1'000'000.0;
     static constexpr int64_t MAX_SIZE       = 50'000;
 
@@ -62,7 +64,7 @@ struct TickValidator {
             std::chrono::system_clock::now().time_since_epoch()).count();
         int64_t drift = r.ts_micros - now_us;
         if (drift > MAX_DRIFT_US || drift < -MAX_DRIFT_US)
-            return fail("timestamp drift > 1 hour");
+            return fail("timestamp drift > 12 hours");
 
         return true;
     }
