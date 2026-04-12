@@ -221,6 +221,13 @@ void TickDB::ensure_schema() {
             "CREATE INDEX IF NOT EXISTS idx_bbo_ts ON bbo(ts_event DESC);");
         if (r) PQclear(r);
     }
+    {
+        // Unique index required for ON CONFLICT DO NOTHING to actually dedup
+        PGresult* r = PQexec(conn_,
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bbo_unique"
+            " ON bbo(symbol, exchange, ts_event);");
+        if (r) PQclear(r);
+    }
 
     // ── depth_by_order hypertable — L3 MBO event stream ───────────
     exec(R"(
@@ -400,7 +407,7 @@ int TickDB::write_bbo(const std::vector<BBORow>& rows) {
         "   $8::int4[],"
         "   $9::int4[],"
         "   $10::varchar[]"
-        " ) ON CONFLICT DO NOTHING";
+        " ) ON CONFLICT (symbol, exchange, ts_event) DO NOTHING";
 
     const char* params[10] = {
         ts_arr.c_str(), sym_arr.c_str(), exch_arr.c_str(),

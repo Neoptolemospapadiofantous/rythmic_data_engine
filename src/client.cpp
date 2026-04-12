@@ -429,7 +429,8 @@ void RithmicClient::dispatch_message(const std::string& payload) {
         rti::BestBidOffer bbo;
         bbo.ParseFromString(payload);
 
-        if (bbo.bid_price() <= 0 || bbo.ask_price() <= 0) return;
+        // Accept one-sided updates (Rithmic sends bid-only or ask-only on partial fills)
+        if (bbo.bid_price() <= 0 && bbo.ask_price() <= 0) return;
 
         int64_t ts_us = static_cast<int64_t>(bbo.ssboe()) * 1'000'000LL +
                         static_cast<int64_t>(bbo.usecs());
