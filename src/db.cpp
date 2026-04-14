@@ -269,12 +269,20 @@ void TickDB::ensure_schema() {
         CREATE TABLE IF NOT EXISTS audit_log (
             id        BIGSERIAL PRIMARY KEY,
             ts        TIMESTAMPTZ DEFAULT NOW(),
+            source    VARCHAR(32)  DEFAULT 'engine',
             event     VARCHAR(64)  NOT NULL,
             severity  VARCHAR(8)   DEFAULT 'INFO',
             details   TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+        CREATE INDEX IF NOT EXISTS idx_audit_sev ON audit_log(severity, ts DESC);
     )");
+    // Add source column if missing (safe migration for existing installs)
+    {
+        PGresult* r = PQexec(conn_,
+            "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS source VARCHAR(32) DEFAULT 'engine';");
+        if (r) PQclear(r);
+    }
 
     // ── Quality metrics — time-series health snapshots ─────────────
     exec(R"(
@@ -289,26 +297,51 @@ void TickDB::ensure_schema() {
             ON quality_metrics(metric, ts DESC);
     )");
 
-    // ── Session tracking — one row per collector session ───────────
+    // ── Session tracking — supports both collector and trading sessions
+    // Schema aligned with bot's SQLite sessions table (python/db/models.py)
     exec(R"(
         CREATE TABLE IF NOT EXISTS sessions (
             id             BIGSERIAL    PRIMARY KEY,
+            strategy       VARCHAR(32)  NOT NULL DEFAULT 'micro_orb',
             mode           VARCHAR(16)  NOT NULL DEFAULT 'collect',
             started_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
             ended_at       TIMESTAMPTZ,
+            params_json    TEXT,
+            report_json    TEXT,
+            summary_json   TEXT,
+            total_pnl      DOUBLE PRECISION DEFAULT 0.0,
+            total_trades   INTEGER      DEFAULT 0,
+            win_rate       DOUBLE PRECISION DEFAULT 0.0,
+            sharpe         DOUBLE PRECISION,
+            max_drawdown   DOUBLE PRECISION,
+            profit_factor  DOUBLE PRECISION,
             tick_count     BIGINT       DEFAULT 0,
             bbo_count      BIGINT       DEFAULT 0,
             depth_count    BIGINT       DEFAULT 0,
             rejected_count BIGINT       DEFAULT 0,
             gap_count      BIGINT       DEFAULT 0,
             alert_count    BIGINT       DEFAULT 0,
-            params_json    TEXT,
-            summary_json   TEXT,
-            notes          TEXT
+            notes          TEXT,
+            created_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_started
             ON sessions(started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_sessions_strategy
+            ON sessions(strategy, mode);
     )");
+    // Add columns that may be missing on existing installs
+    {
+        PGresult* r;
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS strategy      VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS report_json   TEXT;");                                     if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_pnl     DOUBLE PRECISION DEFAULT 0.0;");             if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_trades  INTEGER DEFAULT 0;");                        if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS win_rate      DOUBLE PRECISION DEFAULT 0.0;");             if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sharpe        DOUBLE PRECISION;");                         if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_drawdown  DOUBLE PRECISION;");                         if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS profit_factor DOUBLE PRECISION;");                         if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW();");        if (r) PQclear(r);
+    }
 
     // ── Sentinel alerts — structured anomaly events ────────────────
     exec(R"(
@@ -345,10 +378,13 @@ void TickDB::ensure_schema() {
     )");
 
     // ── Trade log — bot writes trades for engine to audit ──────────
+    // Schema aligned with bot's SQLite trades table (python/db/models.py)
     exec(R"(
         CREATE TABLE IF NOT EXISTS trade_log (
             id              BIGSERIAL    PRIMARY KEY,
             session_id      BIGINT,
+            strategy        VARCHAR(32)  NOT NULL DEFAULT 'micro_orb',
+            mode            VARCHAR(16)  NOT NULL DEFAULT 'backtest',
             trade_date      DATE         NOT NULL,
             entry_time      TIMESTAMPTZ  NOT NULL,
             exit_time       TIMESTAMPTZ,
@@ -356,18 +392,93 @@ void TickDB::ensure_schema() {
             direction       VARCHAR(8)   NOT NULL DEFAULT 'long',
             entry_price     DOUBLE PRECISION NOT NULL,
             exit_price      DOUBLE PRECISION,
-            quantity         INTEGER      NOT NULL DEFAULT 1,
+            quantity        INTEGER      NOT NULL DEFAULT 1,
             gross_pnl       DOUBLE PRECISION DEFAULT 0.0,
             commission      DOUBLE PRECISION DEFAULT 4.0,
+            slippage        DOUBLE PRECISION DEFAULT 0.0,
             net_pnl         DOUBLE PRECISION DEFAULT 0.0,
+            points          DOUBLE PRECISION DEFAULT 0.0,
+            ticks           DOUBLE PRECISION DEFAULT 0.0,
             exit_reason     VARCHAR(32),
             params_json     TEXT,
-            features_json   TEXT
+            features_json   TEXT,
+            created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_trade_log_date
             ON trade_log(trade_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_trade_log_strategy
+            ON trade_log(strategy, mode);
+        CREATE INDEX IF NOT EXISTS idx_trade_log_entry_time
+            ON trade_log(entry_time DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_log_entry
             ON trade_log(session_id, entry_time);
+    )");
+    // Add columns that may be missing on existing installs
+    {
+        PGresult* r;
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS strategy   VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS mode       VARCHAR(16) NOT NULL DEFAULT 'backtest';");  if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS slippage   DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS points     DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS ticks      DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
+        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();");       if (r) PQclear(r);
+    }
+
+    // ── Daily stats — bot writes daily P&L aggregates ───────────────
+    // Schema aligned with bot's SQLite daily_stats table
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS daily_stats (
+            id              BIGSERIAL    PRIMARY KEY,
+            strategy        VARCHAR(32)  NOT NULL DEFAULT 'micro_orb',
+            mode            VARCHAR(16)  NOT NULL DEFAULT 'backtest',
+            stat_date       DATE         NOT NULL,
+            total_pnl       DOUBLE PRECISION DEFAULT 0.0,
+            trade_count     INTEGER      DEFAULT 0,
+            win_count       INTEGER      DEFAULT 0,
+            loss_count      INTEGER      DEFAULT 0,
+            win_rate        DOUBLE PRECISION DEFAULT 0.0,
+            avg_win         DOUBLE PRECISION DEFAULT 0.0,
+            avg_loss        DOUBLE PRECISION DEFAULT 0.0,
+            max_win         DOUBLE PRECISION DEFAULT 0.0,
+            max_loss        DOUBLE PRECISION DEFAULT 0.0,
+            profit_factor   DOUBLE PRECISION,
+            max_drawdown    DOUBLE PRECISION DEFAULT 0.0,
+            session_id      BIGINT,
+            created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            UNIQUE(strategy, mode, stat_date, session_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_daily_date
+            ON daily_stats(stat_date DESC);
+        CREATE INDEX IF NOT EXISTS idx_daily_strategy
+            ON daily_stats(strategy, mode);
+    )");
+
+    // ── Orders — bot writes order lifecycle for live/paper trading ──
+    // Schema aligned with bot's SQLite orders table
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS orders (
+            id              BIGSERIAL    PRIMARY KEY,
+            trade_id        BIGINT,
+            session_id      BIGINT,
+            order_type      VARCHAR(16)  NOT NULL DEFAULT 'market',
+            side            VARCHAR(8)   NOT NULL,
+            quantity        INTEGER      NOT NULL DEFAULT 1,
+            price           DOUBLE PRECISION,
+            fill_price      DOUBLE PRECISION,
+            status          VARCHAR(16)  NOT NULL DEFAULT 'pending',
+            broker_order_id VARCHAR(64),
+            submitted_at    TIMESTAMPTZ,
+            filled_at       TIMESTAMPTZ,
+            cancelled_at    TIMESTAMPTZ,
+            error_msg       TEXT,
+            created_at      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_orders_trade
+            ON orders(trade_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_status
+            ON orders(status);
+        CREATE INDEX IF NOT EXISTS idx_orders_session
+            ON orders(session_id);
     )");
 
     // ── Gate results — records pipeline gate pass/fail ──────────────

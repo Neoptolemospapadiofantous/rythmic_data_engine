@@ -249,6 +249,8 @@ def check_schema(conn) -> bool:
         ("sentinel_alerts",  True),
         ("loss_limits",      True),
         ("trade_log",        True),
+        ("daily_stats",      True),
+        ("orders",           True),
         ("gate_results",     True),
         ("bars_1min",        False),  # TimescaleDB continuous aggregate — may not exist
     ]
@@ -266,10 +268,15 @@ def check_schema(conn) -> bool:
         ("bbo",              ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size"]),
         ("depth_by_order",   ["ts_event", "source_ns", "update_type", "depth_price"]),
         ("quality_metrics",  ["ts", "metric", "value", "labels_json"]),
-        ("sessions",         ["started_at", "tick_count", "rejected_count", "gap_count"]),
+        ("sessions",         ["started_at", "tick_count", "rejected_count", "gap_count",
+                              "strategy", "total_pnl", "sharpe", "max_drawdown", "profit_factor"]),
         ("sentinel_alerts",  ["ts", "check_name", "severity", "message", "value"]),
         ("loss_limits",      ["symbol", "daily_loss_limit", "weekly_loss_limit", "active"]),
-        ("trade_log",        ["entry_time", "exit_time", "net_pnl", "exit_reason"]),
+        ("trade_log",        ["entry_time", "exit_time", "net_pnl", "exit_reason",
+                              "strategy", "mode", "slippage", "points", "ticks", "created_at"]),
+        ("daily_stats",      ["stat_date", "total_pnl", "trade_count", "win_rate", "profit_factor"]),
+        ("orders",           ["order_type", "side", "status", "fill_price", "broker_order_id"]),
+        ("audit_log",        ["source", "event", "severity", "details"]),
         ("gate_results",     ["gate_name", "status", "threshold", "actual_value"]),
     ]
     for tbl, cols in col_checks:
