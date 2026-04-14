@@ -276,7 +276,249 @@ void TickDB::ensure_schema() {
         CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
     )");
 
-    LOG("Schema ready (TimescaleDB hypertable + continuous aggregates)");
+    // ── Quality metrics — time-series health snapshots ─────────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS quality_metrics (
+            id           BIGSERIAL    PRIMARY KEY,
+            ts           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            metric       VARCHAR(64)  NOT NULL,
+            value        DOUBLE PRECISION NOT NULL,
+            labels_json  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_qm_metric_ts
+            ON quality_metrics(metric, ts DESC);
+    )");
+
+    // ── Session tracking — one row per collector session ───────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS sessions (
+            id             BIGSERIAL    PRIMARY KEY,
+            mode           VARCHAR(16)  NOT NULL DEFAULT 'collect',
+            started_at     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            ended_at       TIMESTAMPTZ,
+            tick_count     BIGINT       DEFAULT 0,
+            bbo_count      BIGINT       DEFAULT 0,
+            depth_count    BIGINT       DEFAULT 0,
+            rejected_count BIGINT       DEFAULT 0,
+            gap_count      BIGINT       DEFAULT 0,
+            alert_count    BIGINT       DEFAULT 0,
+            params_json    TEXT,
+            summary_json   TEXT,
+            notes          TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sessions_started
+            ON sessions(started_at DESC);
+    )");
+
+    // ── Sentinel alerts — structured anomaly events ────────────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS sentinel_alerts (
+            id           BIGSERIAL    PRIMARY KEY,
+            ts           TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            session_id   BIGINT       REFERENCES sessions(id),
+            check_name   VARCHAR(64)  NOT NULL,
+            severity     VARCHAR(8)   NOT NULL DEFAULT 'WARN',
+            message      TEXT,
+            value        DOUBLE PRECISION
+        );
+        CREATE INDEX IF NOT EXISTS idx_sentinel_ts
+            ON sentinel_alerts(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_sentinel_check
+            ON sentinel_alerts(check_name, ts DESC);
+    )");
+
+    // ── Loss limits — bot writes limits, engine reads them ─────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS loss_limits (
+            id                BIGSERIAL    PRIMARY KEY,
+            symbol            VARCHAR(32)  NOT NULL DEFAULT 'NQ',
+            daily_loss_limit  DOUBLE PRECISION DEFAULT -1000.0,
+            weekly_loss_limit DOUBLE PRECISION DEFAULT -1800.0,
+            max_drawdown      DOUBLE PRECISION DEFAULT 0.0,
+            max_daily_trades  INTEGER          DEFAULT 3,
+            active            BOOLEAN          DEFAULT TRUE,
+            updated_at        TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
+            notes             TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_loss_limits_symbol
+            ON loss_limits(symbol, active, updated_at DESC);
+    )");
+
+    // ── Trade log — bot writes trades for engine to audit ──────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS trade_log (
+            id              BIGSERIAL    PRIMARY KEY,
+            session_id      BIGINT,
+            trade_date      DATE         NOT NULL,
+            entry_time      TIMESTAMPTZ  NOT NULL,
+            exit_time       TIMESTAMPTZ,
+            symbol          VARCHAR(32)  NOT NULL DEFAULT 'NQ',
+            direction       VARCHAR(8)   NOT NULL DEFAULT 'long',
+            entry_price     DOUBLE PRECISION NOT NULL,
+            exit_price      DOUBLE PRECISION,
+            quantity         INTEGER      NOT NULL DEFAULT 1,
+            gross_pnl       DOUBLE PRECISION DEFAULT 0.0,
+            commission      DOUBLE PRECISION DEFAULT 4.0,
+            net_pnl         DOUBLE PRECISION DEFAULT 0.0,
+            exit_reason     VARCHAR(32),
+            params_json     TEXT,
+            features_json   TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_trade_log_date
+            ON trade_log(trade_date DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_log_entry
+            ON trade_log(session_id, entry_time);
+    )");
+
+    // ── Gate results — records pipeline gate pass/fail ──────────────
+    exec(R"(
+        CREATE TABLE IF NOT EXISTS gate_results (
+            id            BIGSERIAL    PRIMARY KEY,
+            ts            TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+            gate_name     VARCHAR(64)  NOT NULL,
+            status        VARCHAR(16)  NOT NULL DEFAULT 'pending',
+            threshold     DOUBLE PRECISION,
+            actual_value  DOUBLE PRECISION,
+            details_json  TEXT,
+            session_id    BIGINT
+        );
+        CREATE INDEX IF NOT EXISTS idx_gate_results_ts
+            ON gate_results(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_gate_results_name
+            ON gate_results(gate_name, ts DESC);
+    )");
+
+    // ── Gate-ready SQL views (non-fatal — require sufficient data) ──
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_daily_pnl AS
+        SELECT
+            trade_date,
+            symbol,
+            COUNT(*)                   AS trade_count,
+            SUM(net_pnl)               AS daily_pnl,
+            SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+            SUM(CASE WHEN net_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+            MAX(net_pnl)               AS best_trade,
+            MIN(net_pnl)               AS worst_trade,
+            SUM(SUM(net_pnl)) OVER (ORDER BY trade_date) AS cumulative_pnl
+        FROM trade_log
+        GROUP BY trade_date, symbol
+        ORDER BY trade_date;
+    )");
+
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_equity_curve AS
+        SELECT
+            entry_time,
+            net_pnl,
+            SUM(net_pnl) OVER (ORDER BY entry_time) AS equity
+        FROM trade_log
+        ORDER BY entry_time;
+    )");
+
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_loss_limit_status AS
+        SELECT
+            ll.symbol,
+            ll.daily_loss_limit,
+            ll.weekly_loss_limit,
+            ll.max_drawdown,
+            ll.max_daily_trades,
+            COALESCE(d.daily_pnl, 0)   AS today_pnl,
+            COALESCE(d.trade_count, 0)  AS today_trades,
+            COALESCE(w.weekly_pnl, 0)   AS week_pnl,
+            CASE WHEN COALESCE(d.daily_pnl, 0)  <= ll.daily_loss_limit  THEN TRUE ELSE FALSE END AS daily_breached,
+            CASE WHEN COALESCE(w.weekly_pnl, 0)  <= ll.weekly_loss_limit THEN TRUE ELSE FALSE END AS weekly_breached,
+            CASE WHEN COALESCE(d.trade_count, 0) >= ll.max_daily_trades  THEN TRUE ELSE FALSE END AS trade_limit_hit
+        FROM loss_limits ll
+        LEFT JOIN (
+            SELECT symbol, SUM(net_pnl) AS daily_pnl, COUNT(*) AS trade_count
+            FROM trade_log
+            WHERE trade_date = CURRENT_DATE
+            GROUP BY symbol
+        ) d ON d.symbol = ll.symbol
+        LEFT JOIN (
+            SELECT symbol, SUM(net_pnl) AS weekly_pnl
+            FROM trade_log
+            WHERE trade_date >= date_trunc('week', CURRENT_DATE)
+            GROUP BY symbol
+        ) w ON w.symbol = ll.symbol
+        WHERE ll.active = TRUE;
+    )");
+
+    // ── Feature store views (require TimescaleDB bars) ──────────────
+    ts_exec(R"(
+        CREATE MATERIALIZED VIEW IF NOT EXISTS mv_bar_features_1min AS
+        SELECT
+            ts,
+            open, high, low, close, volume,
+            close - open                                         AS body,
+            high - low                                           AS range,
+            CASE WHEN LAG(close) OVER (ORDER BY ts) > 0
+                 THEN (close - LAG(close) OVER (ORDER BY ts))
+                      / LAG(close) OVER (ORDER BY ts) * 100.0
+                 ELSE 0 END                                      AS return_pct,
+            AVG(volume) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS vol_ma20,
+            STDDEV(close) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) AS close_std20,
+            AVG(close)  OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW)  AS close_ma20,
+            AVG(close)  OVER (ORDER BY ts ROWS BETWEEN 59 PRECEDING AND CURRENT ROW)  AS close_ma60,
+            (high - low) / NULLIF(AVG(high - low) OVER (ORDER BY ts ROWS BETWEEN 19 PRECEDING AND CURRENT ROW), 0) AS range_ratio
+        FROM bars_1min
+        ORDER BY ts
+        WITH NO DATA;
+    )");
+
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_regime_labels AS
+        SELECT
+            ts,
+            close,
+            close_std20,
+            close_ma20,
+            NTILE(5) OVER (ORDER BY close_std20)  AS vol_quintile,
+            CASE
+                WHEN close > close_ma60 AND close > close_ma20 THEN 'uptrend'
+                WHEN close < close_ma60 AND close < close_ma20 THEN 'downtrend'
+                WHEN close_std20 > close_ma20 * 0.005          THEN 'volatile'
+                ELSE 'choppy'
+            END AS regime
+        FROM mv_bar_features_1min
+        WHERE close_ma60 IS NOT NULL;
+    )");
+
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_walk_forward_windows AS
+        SELECT
+            w.window_id,
+            w.train_start,
+            w.train_end,
+            w.test_start,
+            w.test_end
+        FROM (
+            SELECT
+                ROW_NUMBER() OVER () AS window_id,
+                ts AS train_start,
+                ts + INTERVAL '90 days' AS train_end,
+                ts + INTERVAL '90 days' AS test_start,
+                ts + INTERVAL '120 days' AS test_end
+            FROM generate_series(
+                (SELECT MIN(ts) FROM bars_1min),
+                (SELECT MAX(ts) - INTERVAL '120 days' FROM bars_1min),
+                INTERVAL '30 days'
+            ) AS ts
+        ) w;
+    )");
+
+    ts_exec(R"(
+        CREATE OR REPLACE VIEW v_oot_partition AS
+        SELECT
+            (SELECT MAX(ts) - INTERVAL '30 days' FROM bars_1min) AS holdout_start,
+            (SELECT MAX(ts) FROM bars_1min)                       AS holdout_end,
+            (SELECT MIN(ts) FROM bars_1min)                       AS data_start,
+            (SELECT MAX(ts) - INTERVAL '30 days' FROM bars_1min) AS pipeline_end;
+    )");
+
+    LOG("Schema ready (TimescaleDB hypertable + continuous aggregates + lifecycle tables)");
 }
 
 // ── write ──────────────────────────────────────────────────────────
@@ -509,6 +751,126 @@ int TickDB::write_depth(const std::vector<DepthRow>& rows) {
     int inserted = tag ? std::atoi(tag) : 0;
     PQclear(res);
     return inserted;
+}
+
+// ── session lifecycle ──────────────────────────────────────────────
+
+int64_t TickDB::start_session(const std::string& mode,
+                               const std::string& params_json) {
+    std::string sql =
+        "INSERT INTO sessions (mode, params_json) VALUES ($1, $2) RETURNING id";
+    const char* params[2] = { mode.c_str(),
+                              params_json.empty() ? nullptr : params_json.c_str() };
+    int lengths[2] = { 0, 0 };
+    int formats[2] = { 0, 0 };
+
+    PGresult* res = PQexecParams(conn_, sql.c_str(), 2, nullptr,
+                                  params, lengths, formats, 0);
+    pg_check(res, "start_session");
+    int64_t id = std::stoll(PQgetvalue(res, 0, 0));
+    PQclear(res);
+    return id;
+}
+
+void TickDB::end_session(int64_t session_id, int64_t ticks, int64_t bbo,
+                          int64_t depth, int64_t rejected, int64_t gaps,
+                          int64_t alerts, const std::string& summary_json) {
+    std::string sql =
+        "UPDATE sessions SET ended_at = NOW(),"
+        " tick_count = $1, bbo_count = $2, depth_count = $3,"
+        " rejected_count = $4, gap_count = $5, alert_count = $6,"
+        " summary_json = $7"
+        " WHERE id = $8";
+
+    std::string s_ticks    = std::to_string(ticks);
+    std::string s_bbo      = std::to_string(bbo);
+    std::string s_depth    = std::to_string(depth);
+    std::string s_rejected = std::to_string(rejected);
+    std::string s_gaps     = std::to_string(gaps);
+    std::string s_alerts   = std::to_string(alerts);
+    std::string s_id       = std::to_string(session_id);
+
+    const char* params[8] = {
+        s_ticks.c_str(), s_bbo.c_str(), s_depth.c_str(),
+        s_rejected.c_str(), s_gaps.c_str(), s_alerts.c_str(),
+        summary_json.empty() ? nullptr : summary_json.c_str(),
+        s_id.c_str()
+    };
+
+    PGresult* res = PQexecParams(conn_, sql.c_str(), 8, nullptr,
+                                  params, nullptr, nullptr, 0);
+    pg_check(res, "end_session");
+    PQclear(res);
+}
+
+// ── quality metrics ───────────────────────────────────────────────
+
+void TickDB::write_metric(const QualityMetric& m) {
+    const char* sql =
+        "INSERT INTO quality_metrics (metric, value, labels_json)"
+        " VALUES ($1, $2, $3)";
+    std::string s_val = std::to_string(m.value);
+    const char* params[3] = {
+        m.metric.c_str(), s_val.c_str(),
+        m.labels_json.empty() ? nullptr : m.labels_json.c_str()
+    };
+    PGresult* res = PQexecParams(conn_, sql, 3, nullptr,
+                                  params, nullptr, nullptr, 0);
+    if (res) {
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            LOG("write_metric error: %s", PQresultErrorMessage(res));
+        PQclear(res);
+    }
+}
+
+void TickDB::write_metrics(const std::vector<QualityMetric>& ms) {
+    for (auto& m : ms) write_metric(m);
+}
+
+// ── sentinel alerts ───────────────────────────────────────────────
+
+void TickDB::write_sentinel_alerts(const std::vector<SentinelAlertRow>& alerts) {
+    if (alerts.empty()) return;
+
+    std::string sql =
+        "INSERT INTO sentinel_alerts (session_id, check_name, severity, message, value) VALUES ";
+    for (size_t i = 0; i < alerts.size(); ++i) {
+        if (i) sql += ',';
+        auto& a = alerts[i];
+        sql += "(" + std::to_string(a.session_id) + ",'" + a.check_name + "','"
+             + a.severity + "','" + a.message + "'," + std::to_string(a.value) + ")";
+    }
+
+    PGresult* res = PQexec(conn_, sql.c_str());
+    if (res) {
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            LOG("write_sentinel_alerts error: %s", PQresultErrorMessage(res));
+        PQclear(res);
+    }
+}
+
+// ── gate results ──────────────────────────────────────────────────
+
+void TickDB::write_gate_result(const GateResult& g) {
+    const char* sql =
+        "INSERT INTO gate_results (gate_name, status, threshold, actual_value, details_json, session_id)"
+        " VALUES ($1, $2, $3, $4, $5, $6)";
+    std::string s_thresh = std::to_string(g.threshold);
+    std::string s_actual = std::to_string(g.actual);
+    std::string s_sid    = std::to_string(g.session_id);
+    const char* params[6] = {
+        g.gate_name.c_str(), g.status.c_str(),
+        s_thresh.c_str(), s_actual.c_str(),
+        g.details_json.empty() ? nullptr : g.details_json.c_str(),
+        s_sid.c_str()
+    };
+    PGresult* res = PQexecParams(conn_, sql, 6, nullptr,
+                                  params, nullptr, nullptr, 0);
+    if (res) {
+        if (PQresultStatus(res) != PGRES_COMMAND_OK)
+            LOG("write_gate_result error: %s", PQresultErrorMessage(res));
+        PQclear(res);
+    }
 }
 
 // ── read ───────────────────────────────────────────────────────────

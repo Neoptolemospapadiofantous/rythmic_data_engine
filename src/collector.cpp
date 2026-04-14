@@ -13,11 +13,18 @@ Collector::Collector(const Config& cfg) : cfg_(cfg) {
     db_    = std::make_unique<TickDB>(cfg_.pg_connstr());
     audit_ = std::make_unique<AuditLog>(db_->conn());
     wal_   = std::make_unique<Wal>(cfg_.wal_path());
+    sentinel_ = std::make_unique<DataSentinel>();
 
     auto count = db_->row_count();
     LOG("PostgreSQL connected (%lld existing ticks)", (long long)count);
+
+    // Start a new DB session
+    session_id_ = db_->start_session("collect");
+    LOG("Session started (id=%lld)", (long long)session_id_);
+
     audit_->info("collector.start",
-                 "existing_ticks=" + std::to_string(count));
+                 "existing_ticks=" + std::to_string(count) +
+                 " session_id=" + std::to_string(session_id_));
 
     // Replay any ticks that were written to WAL but not flushed (crash recovery)
     auto replayed = wal_->replay();
@@ -38,10 +45,11 @@ Collector::Collector(const Config& cfg) : cfg_(cfg) {
     client_->set_on_bbo([this](BBORow r)    { on_bbo(std::move(r));   });
     client_->set_on_depth([this](DepthRow r){ on_depth(std::move(r)); });
 
-    last_flush_       = std::chrono::steady_clock::now();
-    last_audit_flush_ = std::chrono::steady_clock::now();
-    last_bbo_flush_   = std::chrono::steady_clock::now();
-    last_depth_flush_ = std::chrono::steady_clock::now();
+    last_flush_         = std::chrono::steady_clock::now();
+    last_audit_flush_   = std::chrono::steady_clock::now();
+    last_metrics_flush_ = std::chrono::steady_clock::now();
+    last_bbo_flush_     = std::chrono::steady_clock::now();
+    last_depth_flush_   = std::chrono::steady_clock::now();
 }
 
 Collector::~Collector() { stop(); }
@@ -58,6 +66,9 @@ void Collector::on_tick(TickRow row) {
         ++rejected_total_;
         return;
     }
+
+    // Economic plausibility checks (stateful — price jumps, gaps, volume spikes)
+    sentinel_->observe_tick(row.price, row.size, row.ts_micros);
 
     bool need_flush = false;
     {
@@ -91,18 +102,9 @@ int Collector::flush() {
         wal_->write_batch(batch);
     } catch (std::exception& e) {
         LOG("  WAL write failed: %s — ticks may be lost on crash", e.what());
-        // Still attempt DB write; worst case: crash between here and DB commit
-        // loses this batch only.
     }
 
     // Step 3: drain into DB.
-    //
-    // If WAL was already dirty (previous flush failed), replay the full WAL so
-    // we catch up all accumulated missed batches in one shot.
-    // In the normal case (WAL was clean) just write the current batch directly —
-    // avoids a redundant file read.
-    //
-    // Non-blocking: no sleep.  If DB is down, log and return; WAL holds the data.
     try {
         if (!db_->is_connected()) {
             LOG("  DB disconnected — attempting reconnect...");
@@ -110,10 +112,10 @@ int Collector::flush() {
         }
         int n;
         if (was_dirty) {
-            auto pending = wal_->replay();   // old failures + current batch
+            auto pending = wal_->replay();
             n = db_->write(pending);
         } else {
-            n = db_->write(batch);           // fast path: no extra file read
+            n = db_->write(batch);
         }
         wal_->commit();
 
@@ -124,13 +126,22 @@ int Collector::flush() {
                      "count=" + std::to_string(n) +
                      " batch=" + std::to_string(batch.size()));
 
-        // Flush audit events periodically
-        double ae = std::chrono::duration<double>(
-            std::chrono::steady_clock::now() - last_audit_flush_).count();
+        // Periodic flushes
+        auto now = std::chrono::steady_clock::now();
+
+        double ae = std::chrono::duration<double>(now - last_audit_flush_).count();
         if (ae >= 60.0) {
             audit_->flush();
-            last_audit_flush_ = std::chrono::steady_clock::now();
+            last_audit_flush_ = now;
         }
+
+        double me = std::chrono::duration<double>(now - last_metrics_flush_).count();
+        if (me >= METRICS_FLUSH_SEC) {
+            flush_sentinel();
+            flush_metrics();
+            last_metrics_flush_ = now;
+        }
+
         return n;
 
     } catch (std::exception& e) {
@@ -143,10 +154,14 @@ int Collector::flush() {
 // ── on_bbo ─────────────────────────────────────────────────────────
 
 void Collector::on_bbo(BBORow row) {
+    // BBO sentinel checks (bid-ask inversion, wide spread)
+    sentinel_->observe_bbo(row.bid_price, row.ask_price);
+
     bool need_flush = false;
     {
         std::lock_guard lock(bbo_mu_);
         bbo_buf_.push_back(std::move(row));
+        ++bbo_total_;
         double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_bbo_flush_).count();
         need_flush = (static_cast<int>(bbo_buf_.size()) >= BBO_FLUSH_EVERY_N ||
@@ -187,6 +202,7 @@ void Collector::on_depth(DepthRow row) {
     {
         std::lock_guard lock(depth_mu_);
         depth_buf_.push_back(std::move(row));
+        ++depth_total_;
         double elapsed = std::chrono::duration<double>(
             std::chrono::steady_clock::now() - last_depth_flush_).count();
         need_flush = (static_cast<int>(depth_buf_.size()) >= DEPTH_FLUSH_EVERY_N ||
@@ -220,6 +236,49 @@ int Collector::flush_depth() {
     }
 }
 
+// ── flush_sentinel — drain alerts from DataSentinel to DB ─────────
+
+void Collector::flush_sentinel() {
+    auto alerts = sentinel_->drain_alerts();
+    if (alerts.empty()) return;
+
+    std::vector<SentinelAlertRow> rows;
+    rows.reserve(alerts.size());
+    for (auto& a : alerts) {
+        rows.push_back({session_id_, a.check, a.severity, a.message, a.value});
+    }
+
+    try {
+        db_->write_sentinel_alerts(rows);
+        LOG("  Flushed %zu sentinel alerts", alerts.size());
+    } catch (std::exception& e) {
+        LOG("  Sentinel alert flush failed: %s", e.what());
+    }
+}
+
+// ── flush_metrics — write quality metrics snapshot ─────────────────
+
+void Collector::flush_metrics() {
+    try {
+        std::vector<QualityMetric> ms;
+        ms.push_back({"session_ticks",    static_cast<double>(session_total_.load()), ""});
+        ms.push_back({"session_rejected", static_cast<double>(rejected_total_.load()), ""});
+        ms.push_back({"session_bbo",      static_cast<double>(bbo_total_.load()), ""});
+        ms.push_back({"session_depth",    static_cast<double>(depth_total_.load()), ""});
+        ms.push_back({"sentinel_alerts",  static_cast<double>(sentinel_->alert_count()), ""});
+        ms.push_back({"sentinel_gaps",    static_cast<double>(sentinel_->gap_count()), ""});
+
+        double reject_rate = session_total_.load() > 0
+            ? static_cast<double>(rejected_total_.load()) / static_cast<double>(session_total_.load() + rejected_total_.load()) * 100.0
+            : 0.0;
+        ms.push_back({"rejection_rate_pct", reject_rate, ""});
+
+        db_->write_metrics(ms);
+    } catch (std::exception& e) {
+        LOG("  Metrics flush failed: %s", e.what());
+    }
+}
+
 // ── status logging ─────────────────────────────────────────────────
 
 void Collector::status_log() {
@@ -230,9 +289,13 @@ void Collector::status_log() {
             if (ec || !running_) return;
             try {
                 auto s = db_->summary();
-                LOG("  ticks=%lld  session=%lld  latest=%s  price=%s",
+                LOG("  ticks=%lld  session=%lld  rejected=%lld  bbo=%lld  depth=%lld  alerts=%lld  latest=%s  price=%s",
                     (long long)s.tick_count,
                     (long long)session_total_.load(),
+                    (long long)rejected_total_.load(),
+                    (long long)bbo_total_.load(),
+                    (long long)depth_total_.load(),
+                    (long long)sentinel_->alert_count(),
                     s.latest.c_str(),
                     s.price ? std::to_string(*s.price).c_str() : "n/a");
                 audit_->flush();
@@ -267,10 +330,28 @@ void Collector::run() {
 
     ioc_.run();
 
+    // Final flushes before shutdown
     flush();
     flush_bbo();
     flush_depth();
-    audit_->info("collector.stop");
+    flush_sentinel();
+    flush_metrics();
+
+    // Close session in DB
+    try {
+        db_->end_session(session_id_,
+                         session_total_.load(), bbo_total_.load(), depth_total_.load(),
+                         rejected_total_.load(), sentinel_->gap_count(),
+                         sentinel_->alert_count());
+        LOG("Session %lld closed", (long long)session_id_);
+    } catch (std::exception& e) {
+        LOG("Failed to close session: %s", e.what());
+    }
+
+    audit_->info("collector.stop",
+                 "session_id=" + std::to_string(session_id_) +
+                 " ticks=" + std::to_string(session_total_.load()) +
+                 " rejected=" + std::to_string(rejected_total_.load()));
     audit_->flush();
     LOG("Collector stopped.");
 }

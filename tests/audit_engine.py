@@ -148,6 +148,22 @@ def check_source_invariants() -> bool:
          collector_cpp, "on_depth", True),
         ("update_bits includes BBO (1 | 2) in client.cpp",
          client_cpp, "1 | 2", True),
+        ("DataSentinel class in validator.hpp",
+         SRC_DIR / "validator.hpp", "class DataSentinel", True),
+        ("sentinel_->observe_tick() in collector.cpp",
+         collector_cpp, "sentinel_->observe_tick", True),
+        ("sentinel_->observe_bbo() in collector.cpp",
+         collector_cpp, "sentinel_->observe_bbo", True),
+        ("session tracking (start_session) in collector.cpp",
+         collector_cpp, "start_session", True),
+        ("quality_metrics table in db.cpp",
+         db_cpp, "quality_metrics", True),
+        ("sessions table in db.cpp",
+         db_cpp, "CREATE TABLE IF NOT EXISTS sessions", True),
+        ("loss_limits table in db.cpp",
+         db_cpp, "loss_limits", True),
+        ("gate_results table in db.cpp",
+         db_cpp, "gate_results", True),
     ]
 
     for label, fpath, pattern, required in checks:
@@ -224,11 +240,17 @@ def check_schema(conn) -> bool:
 
     # Tables
     table_checks = [
-        ("ticks",          True),
-        ("bbo",            True),
-        ("depth_by_order", True),
-        ("audit_log",      True),
-        ("bars_1min",      False),  # TimescaleDB continuous aggregate — may not exist
+        ("ticks",            True),
+        ("bbo",              True),
+        ("depth_by_order",   True),
+        ("audit_log",        True),
+        ("quality_metrics",  True),
+        ("sessions",         True),
+        ("sentinel_alerts",  True),
+        ("loss_limits",      True),
+        ("trade_log",        True),
+        ("gate_results",     True),
+        ("bars_1min",        False),  # TimescaleDB continuous aggregate — may not exist
     ]
     for tbl, required in table_checks:
         exists = table_exists(tbl)
@@ -240,9 +262,15 @@ def check_schema(conn) -> bool:
 
     # Column checks
     col_checks = [
-        ("ticks",          ["ts_event", "price", "size", "side", "is_buy"]),
-        ("bbo",            ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size"]),
-        ("depth_by_order", ["ts_event", "source_ns", "update_type", "depth_price"]),
+        ("ticks",            ["ts_event", "price", "size", "side", "is_buy"]),
+        ("bbo",              ["ts_event", "bid_price", "bid_size", "ask_price", "ask_size"]),
+        ("depth_by_order",   ["ts_event", "source_ns", "update_type", "depth_price"]),
+        ("quality_metrics",  ["ts", "metric", "value", "labels_json"]),
+        ("sessions",         ["started_at", "tick_count", "rejected_count", "gap_count"]),
+        ("sentinel_alerts",  ["ts", "check_name", "severity", "message", "value"]),
+        ("loss_limits",      ["symbol", "daily_loss_limit", "weekly_loss_limit", "active"]),
+        ("trade_log",        ["entry_time", "exit_time", "net_pnl", "exit_reason"]),
+        ("gate_results",     ["gate_name", "status", "threshold", "actual_value"]),
     ]
     for tbl, cols in col_checks:
         if not table_exists(tbl):
