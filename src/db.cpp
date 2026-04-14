@@ -326,10 +326,8 @@ void TickDB::ensure_schema() {
         );
         CREATE INDEX IF NOT EXISTS idx_sessions_started
             ON sessions(started_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_sessions_strategy
-            ON sessions(strategy, mode);
     )");
-    // Add columns that may be missing on existing installs
+    // Add columns that may be missing on existing installs (must run BEFORE index creation)
     {
         PGresult* r;
         r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS strategy      VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
@@ -341,6 +339,8 @@ void TickDB::ensure_schema() {
         r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_drawdown  DOUBLE PRECISION;");                         if (r) PQclear(r);
         r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS profit_factor DOUBLE PRECISION;");                         if (r) PQclear(r);
         r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW();");        if (r) PQclear(r);
+        // Index on strategy — safe now that column exists
+        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_sessions_strategy ON sessions(strategy, mode);");                          if (r) PQclear(r);
     }
 
     // ── Sentinel alerts — structured anomaly events ────────────────
@@ -406,14 +406,10 @@ void TickDB::ensure_schema() {
         );
         CREATE INDEX IF NOT EXISTS idx_trade_log_date
             ON trade_log(trade_date DESC);
-        CREATE INDEX IF NOT EXISTS idx_trade_log_strategy
-            ON trade_log(strategy, mode);
-        CREATE INDEX IF NOT EXISTS idx_trade_log_entry_time
-            ON trade_log(entry_time DESC);
         CREATE UNIQUE INDEX IF NOT EXISTS idx_trade_log_entry
             ON trade_log(session_id, entry_time);
     )");
-    // Add columns that may be missing on existing installs
+    // Add columns that may be missing on existing installs (must run BEFORE index creation)
     {
         PGresult* r;
         r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS strategy   VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
@@ -422,6 +418,9 @@ void TickDB::ensure_schema() {
         r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS points     DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
         r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS ticks      DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
         r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();");       if (r) PQclear(r);
+        // Indexes on new columns — safe now that columns exist
+        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_trade_log_strategy ON trade_log(strategy, mode);");                      if (r) PQclear(r);
+        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_trade_log_entry_time ON trade_log(entry_time DESC);");                   if (r) PQclear(r);
     }
 
     // ── Daily stats — bot writes daily P&L aggregates ───────────────
