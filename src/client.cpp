@@ -5,7 +5,7 @@
 #include "rithmic.pb.h"
 
 #include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/experimental/parallel_group.hpp>
+#include <boost/asio/experimental/parallel_group.hpp>  // used by connection test
 #include <boost/asio/steady_timer.hpp>
 
 #include <chrono>
@@ -472,39 +472,55 @@ void RithmicClient::dispatch_message(const std::string& payload) {
 }
 
 // ── receive_loop ───────────────────────────────────────────────────
+//
+// Uses Beast's built-in tcp_stream timeout instead of parallel_group.
+// parallel_group cancels the in-progress async_read when the heartbeat
+// timer wins, which corrupts Beast's WebSocket frame parser and causes
+// "Operation canceled [system:125]" on the next read — disconnecting
+// every ~60 seconds and preventing BBO/depth data from ever arriving.
+//
+// With Beast timeout, the tcp_stream returns beast::error::timeout on
+// expiry without corrupting the frame parser, so we can safely send
+// the heartbeat and continue reading.
 
 asio::awaitable<void> RithmicClient::receive_loop(WsStream& ws) {
-    auto ex = co_await asio::this_coro::executor;
-    asio::steady_timer hb_timer(ex);
-    auto schedule_hb = [&] {
-        hb_timer.expires_after(
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-                std::chrono::duration<double>(heartbeat_interval_)));
-    };
-    schedule_hb();
+    auto last_hb = std::chrono::steady_clock::now();
+    int hb_secs = std::max(1, static_cast<int>(heartbeat_interval_));
+
+    // Set per-operation timeout on the underlying tcp_stream
+    beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(hb_secs));
 
     while (running_) {
         beast::flat_buffer buf;
+        boost::system::error_code ec;
 
-        // Wait for either a WS message or the heartbeat deadline
-        auto [order, read_ec, read_n, timer_ec] =
-            co_await asio_exp::make_parallel_group(
-                ws.async_read(buf, asio::deferred),
-                hb_timer.async_wait(asio::deferred)
-            ).async_wait(asio_exp::wait_for_one(), use_awaitable);
+        co_await ws.async_read(buf, asio::redirect_error(use_awaitable, ec));
 
-        if (order[0] == 0) {
-            // A WS message arrived first
-            if (read_ec) throw beast::system_error(read_ec);
-            dispatch_message(strip_header(beast::buffers_to_string(buf.data())));
-            // Respond to any RequestHeartbeat (template 18) sent to us by Rithmic
-            if (hb_response_pending_.exchange(false))
-                co_await send_heartbeat(ws);
-        } else {
-            // Heartbeat timer fired first
-            if (timer_ec == asio::error::operation_aborted) break;
+        if (ec == beast::error::timeout) {
+            // Read timed out — send heartbeat and keep going
             co_await send_heartbeat(ws);
-            schedule_hb();
+            last_hb = std::chrono::steady_clock::now();
+            beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(hb_secs));
+            continue;
+        }
+
+        if (ec) throw beast::system_error(ec);
+
+        // Reset timeout after each successful read
+        beast::get_lowest_layer(ws).expires_after(std::chrono::seconds(hb_secs));
+
+        dispatch_message(strip_header(beast::buffers_to_string(buf.data())));
+
+        // Respond to Rithmic's heartbeat requests (template 18)
+        if (hb_response_pending_.exchange(false))
+            co_await send_heartbeat(ws);
+
+        // Proactively send our own heartbeat if interval nearly elapsed
+        auto now = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(now - last_hb).count();
+        if (elapsed >= heartbeat_interval_ * 0.9) {
+            co_await send_heartbeat(ws);
+            last_hb = now;
         }
     }
 }
