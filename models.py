@@ -78,6 +78,9 @@ class Trade:
     pnl: Optional[float] = None          # dollars
     pnl_points: Optional[float] = None   # NQ points
     stop_loss: Optional[float] = None
+    target: Optional[float] = None       # ORB profit target price
+    exit_reason: Optional[str] = None    # 'SL_HIT', 'TARGET_HIT', 'EOD_FLATTEN', etc.
+    dry_run: Optional[bool] = None       # True if trade was simulated; NULL for real trades
     source: str = "python"               # 'python' or 'cpp'
     session_id: Optional[str] = None
     ml_prediction: Optional[float] = None
@@ -108,6 +111,9 @@ class Trade:
                     pnl            DOUBLE PRECISION,
                     pnl_points     DOUBLE PRECISION,
                     stop_loss      DOUBLE PRECISION,
+                    target         DOUBLE PRECISION,
+                    exit_reason    VARCHAR(32),
+                    dry_run        BOOLEAN,
                     source         VARCHAR(8)       NOT NULL DEFAULT 'python'
                                    CHECK (source IN ('python', 'cpp')),
                     session_id     VARCHAR(64),
@@ -132,12 +138,14 @@ class Trade:
                 INSERT INTO trades (
                     session_date, symbol, direction, entry_price, exit_price,
                     entry_time, exit_time, quantity, pnl, pnl_points, stop_loss,
+                    target, exit_reason, dry_run,
                     source, session_id, ml_prediction, ml_confidence
                 ) VALUES (
                     %(session_date)s, %(symbol)s, %(direction)s, %(entry_price)s,
                     %(exit_price)s, %(entry_time)s, %(exit_time)s, %(quantity)s,
-                    %(pnl)s, %(pnl_points)s, %(stop_loss)s, %(source)s,
-                    %(session_id)s, %(ml_prediction)s, %(ml_confidence)s
+                    %(pnl)s, %(pnl_points)s, %(stop_loss)s,
+                    %(target)s, %(exit_reason)s, %(dry_run)s,
+                    %(source)s, %(session_id)s, %(ml_prediction)s, %(ml_confidence)s
                 )
                 ON CONFLICT (symbol, entry_time, direction) DO UPDATE SET
                     exit_price    = EXCLUDED.exit_price,
@@ -145,6 +153,9 @@ class Trade:
                     pnl           = EXCLUDED.pnl,
                     pnl_points    = EXCLUDED.pnl_points,
                     stop_loss     = EXCLUDED.stop_loss,
+                    target        = EXCLUDED.target,
+                    exit_reason   = EXCLUDED.exit_reason,
+                    dry_run       = COALESCE(EXCLUDED.dry_run, trades.dry_run),
                     session_id    = EXCLUDED.session_id,
                     ml_prediction = EXCLUDED.ml_prediction,
                     ml_confidence = EXCLUDED.ml_confidence,
@@ -162,6 +173,9 @@ class Trade:
                 "pnl": self.pnl,
                 "pnl_points": self.pnl_points,
                 "stop_loss": self.stop_loss,
+                "target": self.target,
+                "exit_reason": self.exit_reason,
+                "dry_run": self.dry_run,
                 "source": self.source,
                 "session_id": self.session_id,
                 "ml_prediction": self.ml_prediction,
