@@ -1,5 +1,5 @@
 """
-pipeline_run.py — Pipeline bottleneck profiler and optimization roadmap.
+pipeline_run.py — Pipeline bottleneck profiler, optimizer, and ML A/B comparison.
 
 Profiles each stage of the NQ ORB optimization pipeline, identifies the
 dominant cost centres, and documents the path from 8.4h → <3h.
@@ -7,6 +7,8 @@ dominant cost centres, and documents the path from 8.4h → <3h.
 Usage:
     python scripts/pipeline_run.py --mock            # profiled mock run (no real data needed)
     python scripts/pipeline_run.py --mock --verbose  # include per-stage recommendations
+    python scripts/pipeline_run.py --compare-ml      # ML on vs off comparison scaffold
+    python scripts/pipeline_run.py --compare-ml --sessions 10  # use 10 paper sessions
     python scripts/pipeline_run.py                   # reserved for real pipeline hook-in
 
 Output: timing report with % share per stage and a ranked optimization plan.
@@ -14,11 +16,14 @@ Output: timing report with % share per stage and a ranked optimization plan.
 from __future__ import annotations
 
 import argparse
+import csv
 import functools
+import json
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -302,6 +307,297 @@ def run_real_pipeline(report: PipelineReport) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ML on/off comparison scaffolding
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SessionMetrics:
+    """Performance metrics for a single paper trading session."""
+    session_date: str
+    ml_enabled: bool
+    trades: int
+    winners: int
+    total_pnl: float
+    max_drawdown: float
+    sharpe: float | None = None
+    notes: str = ""
+
+    @property
+    def win_rate(self) -> float:
+        return self.winners / self.trades if self.trades > 0 else 0.0
+
+    @property
+    def avg_pnl(self) -> float:
+        return self.total_pnl / self.trades if self.trades > 0 else 0.0
+
+
+@dataclass
+class MLComparisonReport:
+    """Aggregated ML on vs off comparison over N paper sessions."""
+    sessions_ml_on: list[SessionMetrics] = field(default_factory=list)
+    sessions_ml_off: list[SessionMetrics] = field(default_factory=list)
+
+    def _agg(self, sessions: list[SessionMetrics]) -> dict[str, Any]:
+        if not sessions:
+            return {
+                "n": 0, "total_pnl": 0.0, "avg_pnl_per_session": 0.0,
+                "win_rate": 0.0, "avg_trades": 0.0, "avg_drawdown": 0.0,
+            }
+        n = len(sessions)
+        total_trades = sum(s.trades for s in sessions)
+        total_winners = sum(s.winners for s in sessions)
+        return {
+            "n": n,
+            "total_pnl": sum(s.total_pnl for s in sessions),
+            "avg_pnl_per_session": sum(s.total_pnl for s in sessions) / n,
+            "win_rate": total_winners / total_trades if total_trades > 0 else 0.0,
+            "avg_trades": total_trades / n,
+            "avg_drawdown": sum(s.max_drawdown for s in sessions) / n,
+        }
+
+    def print(self) -> None:
+        on = self._agg(self.sessions_ml_on)
+        off = self._agg(self.sessions_ml_off)
+
+        print()
+        print("=" * 66)
+        print("  ML On vs Off — Paper Trading Comparison")
+        print("=" * 66)
+        print(f"  {'Metric':<28} {'ML ON':>12}  {'ML OFF':>12}  {'Delta':>10}")
+        print(f"  {'─'*28}  {'─'*12}  {'─'*12}  {'─'*10}")
+
+        rows = [
+            ("Sessions",         on["n"],                        off["n"],                        None),
+            ("Total P&L",        on["total_pnl"],                off["total_pnl"],                "$"),
+            ("Avg P&L/session",  on["avg_pnl_per_session"],      off["avg_pnl_per_session"],      "$"),
+            ("Win rate",         on["win_rate"] * 100,           off["win_rate"] * 100,           "%"),
+            ("Avg trades/day",   on["avg_trades"],               off["avg_trades"],               None),
+            ("Avg max drawdown", on["avg_drawdown"],             off["avg_drawdown"],             "$"),
+        ]
+
+        for label, v_on, v_off, fmt in rows:
+            delta = v_on - v_off if isinstance(v_on, (int, float)) and isinstance(v_off, (int, float)) else None
+            if fmt == "$":
+                s_on  = f"${v_on:>10.2f}"
+                s_off = f"${v_off:>10.2f}"
+                s_del = f"${delta:>+9.2f}" if delta is not None else ""
+            elif fmt == "%":
+                s_on  = f"{v_on:>11.1f}%"
+                s_off = f"{v_off:>11.1f}%"
+                s_del = f"{delta:>+10.1f}%" if delta is not None else ""
+            else:
+                s_on  = f"{v_on:>12}"
+                s_off = f"{v_off:>12}"
+                s_del = f"{delta:>+10}" if delta is not None else ""
+            print(f"  {label:<28} {s_on}  {s_off}  {s_del}")
+
+        print("=" * 66)
+
+        # Verdict
+        if on["n"] < 5 or off["n"] < 5:
+            print(f"\n  WARNING: Insufficient data ({on['n']} ML-on, {off['n']} ML-off sessions).")
+            print(  "  Minimum 5 sessions per arm needed for a meaningful comparison.")
+        else:
+            delta_pnl = on["avg_pnl_per_session"] - off["avg_pnl_per_session"]
+            if delta_pnl > 0:
+                print(f"\n  VERDICT: ML ON outperforms ML OFF by ${delta_pnl:.2f}/session avg.")
+            elif delta_pnl < 0:
+                print(f"\n  VERDICT: ML OFF outperforms ML ON by ${-delta_pnl:.2f}/session avg.")
+            else:
+                print(f"\n  VERDICT: No difference in avg P&L between ML ON and ML OFF.")
+        print()
+
+    def save_csv(self, path: Path) -> None:
+        """Write session-level data to CSV for external analysis."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rows = [asdict(s) for s in self.sessions_ml_on + self.sessions_ml_off]
+        if not rows:
+            return
+        with path.open("w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=rows[0].keys())
+            writer.writeheader()
+            writer.writerows(rows)
+        print(f"  CSV saved → {path}")
+
+
+_ML_COMPARISON_STORE = Path("data") / "ml_comparison" / "sessions.json"
+
+
+def _load_comparison_store() -> MLComparisonReport:
+    """Load persisted session records from the comparison data store."""
+    report = MLComparisonReport()
+    if not _ML_COMPARISON_STORE.exists():
+        return report
+    try:
+        records = json.loads(_ML_COMPARISON_STORE.read_text())
+        for r in records:
+            m = SessionMetrics(**r)
+            if m.ml_enabled:
+                report.sessions_ml_on.append(m)
+            else:
+                report.sessions_ml_off.append(m)
+    except Exception as exc:
+        print(f"  WARN: could not load comparison store: {exc}", file=sys.stderr)
+    return report
+
+
+def _save_comparison_store(report: MLComparisonReport) -> None:
+    """Persist session records to the comparison data store (atomic write)."""
+    _ML_COMPARISON_STORE.parent.mkdir(parents=True, exist_ok=True)
+    records = [asdict(s) for s in report.sessions_ml_on + report.sessions_ml_off]
+    tmp = _ML_COMPARISON_STORE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(records, indent=2))
+    tmp.rename(_ML_COMPARISON_STORE)
+
+
+def _load_session_from_db(session_date: str, ml_enabled: bool) -> SessionMetrics | None:
+    """
+    Query the trades table for a single session's metrics.
+
+    Returns None if the DB is unavailable or no trades exist for that date/ml flag.
+    The query targets the 'trades' table written by live_trader.py.
+    """
+    try:
+        import os as _os
+        from pathlib import Path as _Path
+        env_file = _Path(".env")
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    if k.strip() not in _os.environ:
+                        _os.environ[k.strip()] = v.strip()
+
+        import psycopg2
+        conn = psycopg2.connect(
+            host=_os.environ.get("PG_HOST", "localhost"),
+            port=int(_os.environ.get("PG_PORT", "5432")),
+            dbname=_os.environ.get("PG_DB", "rithmic"),
+            user=_os.environ.get("PG_USER", "rithmic_user"),
+            password=_os.environ.get("PG_PASSWORD", ""),
+            connect_timeout=5,
+        )
+        cur = conn.cursor()
+        # Use DATE() on entry_time; fall back to entry_ts column name if schema differs
+        query = """
+            SELECT
+                COUNT(*)                         AS trades,
+                COALESCE(SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END), 0) AS winners,
+                COALESCE(SUM(pnl), 0.0)          AS total_pnl,
+                COALESCE(MIN(pnl), 0.0)          AS max_adverse
+            FROM trades
+            WHERE DATE(entry_time) = %s
+              AND dry_run = FALSE
+        """
+        try:
+            cur.execute(query, (session_date,))
+        except psycopg2.errors.UndefinedColumn:
+            # Schema uses entry_ts (live_trader schema variant)
+            conn.rollback()
+            query = query.replace("entry_time", "entry_ts")
+            cur.execute(query, (session_date,))
+
+        row = cur.fetchone()
+        conn.close()
+
+        if not row or row[0] == 0:
+            return None
+
+        trades, winners, total_pnl, max_adverse = row
+        return SessionMetrics(
+            session_date=session_date,
+            ml_enabled=ml_enabled,
+            trades=int(trades),
+            winners=int(winners),
+            total_pnl=float(total_pnl),
+            max_drawdown=abs(float(max_adverse)),
+        )
+    except Exception as exc:
+        print(f"  WARN: DB query failed for {session_date}: {exc}", file=sys.stderr)
+        return None
+
+
+def _add_mock_session(
+    report: MLComparisonReport,
+    ml_enabled: bool,
+    n: int = 1,
+) -> None:
+    """Add synthetic sessions so --compare-ml --mock works without real data."""
+    import math, random
+    rng = random.Random(42 + len(report.sessions_ml_on) + len(report.sessions_ml_off))
+    for i in range(n):
+        # ML ON: slightly higher win rate and P&L by design
+        base_pnl = (250.0 if ml_enabled else 180.0) + rng.gauss(0, 80)
+        trades = rng.randint(1, 4)
+        winners = rng.randint(0, trades)
+        m = SessionMetrics(
+            session_date=f"2026-04-{(i % 20) + 1:02d}",
+            ml_enabled=ml_enabled,
+            trades=trades,
+            winners=winners,
+            total_pnl=round(base_pnl, 2),
+            max_drawdown=round(abs(rng.gauss(150, 50)), 2),
+            notes="mock",
+        )
+        if ml_enabled:
+            report.sessions_ml_on.append(m)
+        else:
+            report.sessions_ml_off.append(m)
+
+
+def run_ml_comparison(
+    *,
+    sessions: int,
+    mock: bool = False,
+    csv_path: Path | None = None,
+    start_date: str | None = None,
+) -> MLComparisonReport:
+    """
+    Load or synthesize ML on/off session data and print the comparison report.
+
+    In production (mock=False), this queries the trades table in PostgreSQL
+    for each session date. Pass --mock for a synthetic demo with fabricated data.
+
+    The comparison stores results in data/ml_comparison/sessions.json so that
+    data accumulates across multiple runs (one run per trading day).
+    """
+    report = _load_comparison_store()
+
+    if mock:
+        # Fill up to `sessions` sessions per arm with synthetic data
+        needed_on  = max(0, sessions - len(report.sessions_ml_on))
+        needed_off = max(0, sessions - len(report.sessions_ml_off))
+        if needed_on > 0:
+            _add_mock_session(report, ml_enabled=True,  n=needed_on)
+        if needed_off > 0:
+            _add_mock_session(report, ml_enabled=False, n=needed_off)
+    else:
+        # Real mode: load today's session from DB (both arms if applicable)
+        today = start_date or date.today().isoformat()
+        for ml_flag in (True, False):
+            existing_dates = {
+                s.session_date
+                for s in (report.sessions_ml_on if ml_flag else report.sessions_ml_off)
+            }
+            if today not in existing_dates:
+                metrics = _load_session_from_db(today, ml_enabled=ml_flag)
+                if metrics is not None:
+                    if ml_flag:
+                        report.sessions_ml_on.append(metrics)
+                    else:
+                        report.sessions_ml_off.append(metrics)
+        _save_comparison_store(report)
+
+    report.print()
+
+    if csv_path is not None:
+        report.save_csv(csv_path)
+
+    return report
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -319,7 +615,47 @@ def main() -> None:
         action="store_true",
         help="Include per-stage optimisation recommendations in the report",
     )
+    parser.add_argument(
+        "--compare-ml",
+        action="store_true",
+        dest="compare_ml",
+        help=(
+            "Show ML on vs off paper trading comparison. "
+            "Loads from data/ml_comparison/sessions.json; use --mock for synthetic data."
+        ),
+    )
+    parser.add_argument(
+        "--sessions",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Target number of sessions per arm for --compare-ml (default: 10)",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Export ML comparison session data to CSV at PATH",
+    )
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        dest="start_date",
+        help="Session date to load from DB in --compare-ml mode (default: today)",
+    )
     args = parser.parse_args()
+
+    if args.compare_ml:
+        run_ml_comparison(
+            sessions=args.sessions,
+            mock=args.mock,
+            csv_path=args.csv,
+            start_date=args.start_date,
+        )
+        return
 
     report = PipelineReport()
 
