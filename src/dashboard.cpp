@@ -32,6 +32,8 @@
 #include <thread>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include <boost/asio.hpp>
 #include <boost/asio/steady_timer.hpp>
 
@@ -93,17 +95,19 @@ struct Metrics {
     // Audit tail — last 5 formatted rows from audit_log
     std::vector<std::string> audit_tail;
 
-    // Position panel (polled from trades table every 5 s)
-    std::string pos_side    = "FLAT";   // "LONG", "SHORT", or "FLAT"
-    double      pos_entry   = 0.0;
-    double      pos_sl      = 0.0;
-    double      daily_pnl   = 0.0;     // sum pnl for today's closed trades
-    double      daily_limit = 0.0;     // daily_loss_limit from live_config.json
+    // Position panel (primary: data/live_state.json; fallback: trades DB)
+    std::string pos_side            = "FLAT";  // "LONG", "SHORT", "FLAT"
+    double      pos_entry           = 0.0;
+    double      pos_sl              = 0.0;
+    double      pos_unrealized_pnl  = 0.0;    // from live_state.json
+    double      daily_pnl           = 0.0;
+    double      daily_limit         = 0.0;    // from config/live_config.json
+    bool        live_state_present  = false;  // false → show NOT RUNNING
 
     // Reconnection panel
-    int         recon_failures = 0;    // consecutive reconnect events this session
-    int64_t     last_tick_ms   = 0;    // system-clock ms of last received tick
-    std::string conn_state     = "INIT";
+    int         recon_failures = 0;    // from live_state.json reconnect_failures
+    int64_t     last_tick_ms   = 0;    // system-clock ms of last received tick (C++ feed)
+    std::string conn_state     = "INIT"; // from live_state.json connection field
 };
 
 static Metrics           g_metrics;
@@ -128,8 +132,8 @@ static double read_daily_limit(const char* path = "config/live_config.json") {
 // ── Helper: find PID of live_trader.py ────────────────────────────
 
 static pid_t find_live_trader_pid() {
-    // Check common PID file locations first
-    for (const char* pf : {"/tmp/live_trader.pid", "/run/live_trader.pid"}) {
+    // Check common PID file locations first (data/ path is written by live_trader.py)
+    for (const char* pf : {"data/live_trader.pid", "/tmp/live_trader.pid", "/run/live_trader.pid"}) {
         std::ifstream f(pf);
         if (!f.is_open()) continue;
         pid_t pid = 0;
@@ -384,45 +388,55 @@ struct Pipeline {
                 if (res) PQclear(res);
             } catch (...) {}
 
-            // Open position for today (canonical schema: entry_time/exit_time)
-            try {
-                PGresult* res = PQexec(db->conn(),
-                    "SELECT direction, entry_price,"
-                    "  CASE WHEN stop_loss IS NOT NULL THEN stop_loss::text ELSE '' END"
-                    " FROM trades"
-                    " WHERE exit_time IS NULL"
-                    "   AND session_date = CURRENT_DATE"
-                    " ORDER BY entry_time DESC LIMIT 1");
-                if (res && PQresultStatus(res) == PGRES_TUPLES_OK) {
-                    std::lock_guard lk(g_metrics.mu);
-                    if (PQntuples(res) > 0) {
-                        g_metrics.pos_side  = PQgetvalue(res, 0, 0);
-                        g_metrics.pos_entry = std::stod(PQgetvalue(res, 0, 1));
-                        const char* sl_str  = PQgetvalue(res, 0, 2);
-                        g_metrics.pos_sl    = sl_str[0] ? std::stod(sl_str) : 0.0;
-                    } else {
-                        g_metrics.pos_side  = "FLAT";
-                        g_metrics.pos_entry = 0.0;
-                        g_metrics.pos_sl    = 0.0;
-                    }
-                }
-                if (res) PQclear(res);
-            } catch (...) {}
+            // Primary position/reconnect data: data/live_state.json (written by live_trader.py)
+            // If absent → show NOT RUNNING; if present → override DB with in-memory state.
+            {
+                bool ok = false;
+                try {
+                    std::ifstream sf("data/live_state.json");
+                    if (sf.is_open()) {
+                        nlohmann::json s;
+                        sf >> s;
 
-            // Daily closed P&L for today
-            try {
-                PGresult* res = PQexec(db->conn(),
-                    "SELECT COALESCE(SUM(pnl), 0)"
-                    " FROM trades"
-                    " WHERE session_date = CURRENT_DATE"
-                    "   AND exit_time IS NOT NULL");
-                if (res && PQresultStatus(res) == PGRES_TUPLES_OK &&
-                    PQntuples(res) > 0) {
-                    std::lock_guard lk(g_metrics.mu);
-                    g_metrics.daily_pnl = std::stod(PQgetvalue(res, 0, 0));
+                        auto str_or = [&](const char* k, const char* d) -> std::string {
+                            auto it = s.find(k);
+                            if (it == s.end() || it->is_null()) return d;
+                            return it->get<std::string>();
+                        };
+                        auto dbl_or = [&](const char* k, double d) -> double {
+                            auto it = s.find(k);
+                            if (it == s.end() || it->is_null()) return d;
+                            return it->get<double>();
+                        };
+                        auto int_or = [&](const char* k, int d) -> int {
+                            auto it = s.find(k);
+                            if (it == s.end() || it->is_null()) return d;
+                            return it->get<int>();
+                        };
+
+                        std::lock_guard lk(g_metrics.mu);
+                        g_metrics.pos_side           = str_or("position",            "FLAT");
+                        g_metrics.pos_entry          = dbl_or("entry_price",         0.0);
+                        g_metrics.pos_sl             = dbl_or("sl",                  0.0);
+                        g_metrics.pos_unrealized_pnl = dbl_or("unrealized_pnl",      0.0);
+                        g_metrics.daily_pnl          = dbl_or("daily_pnl",           0.0);
+                        g_metrics.conn_state         = str_or("connection",           "UNKNOWN");
+                        g_metrics.recon_failures     = int_or("reconnect_failures",  0);
+                        ok = true;
+                    }
+                } catch (...) {}
+
+                std::lock_guard lk(g_metrics.mu);
+                g_metrics.live_state_present = ok;
+                if (!ok) {
+                    // live_trader is not running — clear position state
+                    g_metrics.pos_side           = "FLAT";
+                    g_metrics.pos_entry          = 0.0;
+                    g_metrics.pos_sl             = 0.0;
+                    g_metrics.pos_unrealized_pnl = 0.0;
+                    g_metrics.conn_state         = "NOT RUNNING";
                 }
-                if (res) PQclear(res);
-            } catch (...) {}
+            }
         }
     }
 
@@ -478,7 +492,8 @@ static void render() {
     double tps5 = 0, tpm60 = 0;
 
     std::string pos_side;
-    double      pos_entry, pos_sl, daily_pnl, daily_limit;
+    double      pos_entry, pos_sl, pos_unrealized_pnl, daily_pnl, daily_limit;
+    bool        live_state_present;
     int         recon_failures;
     int64_t     last_tick_ms;
     std::string conn_state;
@@ -502,14 +517,16 @@ static void render() {
         bar_vol = g_metrics.bar_vol; bar_ts = g_metrics.bar_ts;
         audit_tail = g_metrics.audit_tail;
 
-        pos_side       = g_metrics.pos_side;
-        pos_entry      = g_metrics.pos_entry;
-        pos_sl         = g_metrics.pos_sl;
-        daily_pnl      = g_metrics.daily_pnl;
-        daily_limit    = g_metrics.daily_limit;
-        recon_failures = g_metrics.recon_failures;
-        last_tick_ms   = g_metrics.last_tick_ms;
-        conn_state     = g_metrics.conn_state;
+        pos_side            = g_metrics.pos_side;
+        pos_entry           = g_metrics.pos_entry;
+        pos_sl              = g_metrics.pos_sl;
+        pos_unrealized_pnl  = g_metrics.pos_unrealized_pnl;
+        daily_pnl           = g_metrics.daily_pnl;
+        daily_limit         = g_metrics.daily_limit;
+        live_state_present  = g_metrics.live_state_present;
+        recon_failures      = g_metrics.recon_failures;
+        last_tick_ms        = g_metrics.last_tick_ms;
+        conn_state          = g_metrics.conn_state;
 
         if (!g_metrics.rate_ms.empty()) {
             int64_t now_ms =
@@ -528,12 +545,13 @@ static void render() {
         std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
 
-    // Compute unrealized P&L for open position using live price
-    double trade_pnl = 0.0;
-    if (pos_side == "LONG" && pos_entry > 0 && price > 0)
-        trade_pnl = (price - pos_entry) * 20.0;
-    else if (pos_side == "SHORT" && pos_entry > 0 && price > 0)
-        trade_pnl = (pos_entry - price) * 20.0;
+    // Use unrealized P&L from live_state.json (Python's in-memory calc) when available.
+    // Fall back to C++ tick-based estimate if live_state is absent.
+    double trade_pnl = live_state_present
+        ? pos_unrealized_pnl
+        : (pos_side == "LONG"  && pos_entry > 0 && price > 0 ? (price - pos_entry) * 20.0
+         : pos_side == "SHORT" && pos_entry > 0 && price > 0 ? (pos_entry - price) * 20.0
+         : 0.0);
 
     int cols   = getmaxx(stdscr);
     int midcol = 40;
@@ -671,44 +689,52 @@ static void render() {
     set_color(C_DIM);
     mvhline(r, 0, ACS_HLINE, cols);
 
-    // ── Row 18-22: POSITION (left) / RECONNECT (right) ───────────
+    // ── Row 18-23: POSITION (left) / RECONNECT (right) ──────────
     r = 18;
     draw_section(r, 1, "POSITION");
     draw_section(r, midcol, "RECONNECT");
 
-    // Side indicator with color
-    draw_label(r+1, 1, "Side:");
-    if (pos_side == "LONG")        { set_color(C_OK);  printw("LONG  ▲"); }
-    else if (pos_side == "SHORT")  { set_color(C_ERR); printw("SHORT ▼"); }
-    else                           { set_color(C_DIM); printw("FLAT  —"); }
-
-    // Entry price
-    set_color(C_VALUE);
-    draw_label(r+2, 1, "Entry:");
-    if (pos_entry > 0) printw("%.2f", pos_entry);
-    else               printw("--");
-
-    // Stop loss
-    draw_label(r+3, 1, "Stop loss:");
-    if (pos_sl > 0) {
-        set_color(C_ERR);
-        printw("%.2f", pos_sl);
+    if (!live_state_present) {
+        // live_trader.py is not running or hasn't written state yet
+        set_color(C_WARN);
+        mvprintw(r+1, 1, "LIVE TRADER: NOT RUNNING");
+        set_color(C_DIM);
+        mvprintw(r+2, 1, "(data/live_state.json absent)");
     } else {
-        set_color(C_DIM);
-        printw("--");
-    }
+        // Side indicator with color
+        draw_label(r+1, 1, "Side:");
+        if (pos_side == "LONG")        { set_color(C_OK);  printw("LONG  ▲"); }
+        else if (pos_side == "SHORT")  { set_color(C_ERR); printw("SHORT ▼"); }
+        else                           { set_color(C_DIM); printw("FLAT  —"); }
 
-    // Trade P&L (unrealized if in position)
-    set_color(C_VALUE);
-    draw_label(r+4, 1, "Trade P&L:");
-    if (pos_side != "FLAT" && pos_entry > 0 && price > 0) {
-        if (trade_pnl >= 0) { set_color(C_OK);  printw("+$%.2f", trade_pnl); }
-        else                { set_color(C_ERR); printw("-$%.2f", -trade_pnl); }
-        set_color(C_DIM);
-        printw("  (unrealized)");
-    } else {
-        set_color(C_DIM);
-        printw("--");
+        // Entry price
+        set_color(C_VALUE);
+        draw_label(r+2, 1, "Entry:");
+        if (pos_entry > 0) printw("%.2f", pos_entry);
+        else               printw("--");
+
+        // Stop loss (real-time from live_state.json)
+        draw_label(r+3, 1, "Stop loss:");
+        if (pos_sl > 0) {
+            set_color(C_ERR);
+            printw("%.2f", pos_sl);
+        } else {
+            set_color(C_DIM);
+            printw("--");
+        }
+
+        // Trade P&L (unrealized from live_state.json)
+        set_color(C_VALUE);
+        draw_label(r+4, 1, "Trade P&L:");
+        if (pos_side != "FLAT") {
+            if (trade_pnl >= 0) { set_color(C_OK);  printw("+$%.2f", trade_pnl); }
+            else                { set_color(C_ERR); printw("-$%.2f", -trade_pnl); }
+            set_color(C_DIM);
+            printw("  (unrealized)");
+        } else {
+            set_color(C_DIM);
+            printw("--");
+        }
     }
 
     // Daily P&L vs limit
@@ -721,33 +747,38 @@ static void render() {
         printw(" / limit -$%.0f", daily_limit);
     }
 
-    // ── RECONNECT panel (right) ────────────────────────────────
+    // ── RECONNECT panel (right) — data from live_state.json ─────
 
-    // Connection state
+    // Connection state (from live_trader.py's reconnection manager)
     draw_label(r+1, midcol, "State:");
-    if (conn_state == "STREAMING")   { set_color(C_OK);   printw("STREAMING"); }
-    else if (conn_state == "RECONNECTED") { set_color(C_WARN); printw("RECONNECTED"); }
-    else if (conn_state == "STALE")  { set_color(C_ERR);  printw("STALE — no ticks"); }
-    else                             { set_color(C_DIM);  printw("%s", conn_state.c_str()); }
+    if (!live_state_present) {
+        set_color(C_DIM);
+        printw("—");
+    } else if (conn_state == "CONNECTED")   { set_color(C_OK);   printw("CONNECTED"); }
+    else if (conn_state == "RECONNECTING")  { set_color(C_WARN); printw("RECONNECTING"); }
+    else if (conn_state == "DISCONNECTED")  { set_color(C_ERR);  printw("DISCONNECTED"); }
+    else                                    { set_color(C_DIM);  printw("%s", conn_state.c_str()); }
 
-    // Time since last tick
+    // Time since last tick received by C++ feed (independent health signal)
     set_color(C_VALUE);
-    draw_label(r+2, midcol, "Last tick:");
+    draw_label(r+2, midcol, "C++ feed:");
     if (last_tick_ms > 0) {
         int64_t secs = (now_ms_render - last_tick_ms) / 1000;
         if (secs < 5)        { set_color(C_OK);   printw("%llds ago", (long long)secs); }
         else if (secs < 30)  { set_color(C_WARN); printw("%llds ago", (long long)secs); }
-        else                 { set_color(C_ERR);  printw("%llds ago", (long long)secs); }
+        else                 { set_color(C_ERR);  printw("%llds ago — STALE", (long long)secs); }
     } else {
         set_color(C_DIM);
         printw("no ticks yet");
     }
 
-    // Consecutive reconnect events
+    // Consecutive reconnect failures (from live_trader.py)
     set_color(C_VALUE);
     draw_label(r+3, midcol, "Reconnects:");
-    if (recon_failures == 0) { set_color(C_OK);  printw("0"); }
-    else                     { set_color(C_WARN); printw("%d", recon_failures); }
+    if (!live_state_present) {
+        set_color(C_DIM); printw("—");
+    } else if (recon_failures == 0) { set_color(C_OK);   printw("0"); }
+    else                            { set_color(C_WARN); printw("%d", recon_failures); }
 
     // Feed health summary
     set_color(C_VALUE);
