@@ -65,6 +65,7 @@ def _write_config(tmp_dir: Path, cfg: dict) -> Path:
 # tests for scripts/no_deploy.py
 # ---------------------------------------------------------------------------
 
+@pytest.mark.fast
 class TestNoDeploy(unittest.TestCase):
 
     def setUp(self):
@@ -145,6 +146,7 @@ class TestNoDeploy(unittest.TestCase):
 # tests for go_live.py gate logic
 # ---------------------------------------------------------------------------
 
+@pytest.mark.fast
 class TestGoLiveGates(unittest.TestCase):
     """Tests for each pre-flight gate in go_live.run_preflight()."""
 
@@ -362,6 +364,7 @@ class TestGoLiveGates(unittest.TestCase):
 # Gate F — ML model checksum tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.fast
 class TestGateMLChecksum(unittest.TestCase):
     """Gate F: ML model file existence + sha256 checksum verification."""
 
@@ -446,6 +449,7 @@ class TestGateMLChecksum(unittest.TestCase):
 # Gate J — account equity tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.fast
 class TestGateAccountEquity(unittest.TestCase):
     """Gate J: account equity above minimum (via PNL_PLANT_EQUITY env var)."""
 
@@ -494,6 +498,7 @@ class TestGateAccountEquity(unittest.TestCase):
 # integration smoke test (importability / CLI help)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.fast
 class TestGoLiveCLI(unittest.TestCase):
 
     def test_go_live_importable(self):

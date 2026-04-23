@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# run_fast_tests.sh — Fast feedback loop: runs only 'fast' and 'preflight' unit tests.
+# run_fast_tests.sh — Fast feedback loop: pure unit tests, no I/O, <2s total.
 #
-# Target: <2 seconds total. No subprocess calls, no DB, no C++ binary required.
-# Use this before every commit to catch regressions instantly.
+# Run before every commit to catch regressions in <2 seconds.
 #
 # Usage:
-#   ./scripts/run_fast_tests.sh           # fast + preflight (default)
-#   ./scripts/run_fast_tests.sh --all     # full test suite (slower)
+#   ./scripts/run_fast_tests.sh           # fast marker suite (default)
+#   ./scripts/run_fast_tests.sh --all     # full test suite including slow/subprocess
 #   ./scripts/run_fast_tests.sh --parity  # feature_parity + orb_parity only
 
 set -euo pipefail
@@ -24,13 +23,7 @@ case "${1:-}" in
         exec "$PYTHON" -m pytest -m "feature_parity or orb_parity" -q
         ;;
     *)
-        # Default: fast unit tests — no I/O, no subprocess, <2s total
-        exec "$PYTHON" -m pytest \
-            tests/test_feature_parity.py \
-            tests/test_orb_parity.py \
-            tests/test_preflight.py \
-            tests/test_live_trader.py \
-            -m "not (slow or cpp or live)" \
-            -q --tb=short
+        # Default: fast-marked pure unit tests — no subprocess, no DB, <2s
+        exec "$PYTHON" -m pytest -m fast -q
         ;;
 esac

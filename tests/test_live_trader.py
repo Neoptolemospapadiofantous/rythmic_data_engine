@@ -85,6 +85,7 @@ def _feed_range_bars(strategy: MicroORBStrategy, n: int = 5) -> None:
 
 # ── state machine tests ───────────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestMicroORBStateMachine(unittest.TestCase):
 
     def setUp(self):
@@ -192,6 +193,7 @@ class TestMicroORBStateMachine(unittest.TestCase):
 
 # ── on_tick / stop-loss tests ─────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestOnTick(unittest.TestCase):
 
     def _in_position_strategy(self, direction="LONG") -> tuple[MicroORBStrategy, Signal]:
@@ -242,6 +244,7 @@ class TestOnTick(unittest.TestCase):
 
 # ── dry_run gate test ─────────────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestDryRunGate(unittest.TestCase):
 
     def test_dry_run_logs_but_does_not_call_rithmic(self):
@@ -271,6 +274,7 @@ class TestDryRunGate(unittest.TestCase):
 
 # ── NO_DEPLOY lockfile test ───────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestNoDeployLockfile(unittest.TestCase):
 
     def test_no_deploy_causes_sys_exit(self):
@@ -294,6 +298,7 @@ class TestNoDeployLockfile(unittest.TestCase):
 
 # ── SIGTERM handler test ──────────────────────────────────────────────────────
 
+@pytest.mark.slow
 class TestSigtermHandler(unittest.TestCase):
 
     def test_sigterm_causes_clean_exit(self):
@@ -337,6 +342,7 @@ class TestSigtermHandler(unittest.TestCase):
 
 # ── position reconciliation test ─────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestPositionReconciliation(unittest.TestCase):
 
     def test_no_open_position_leaves_strategy_waiting(self):
@@ -391,6 +397,7 @@ class TestPositionReconciliation(unittest.TestCase):
 
 # ── schema alignment tests ────────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestSchemaAlignment(unittest.TestCase):
 
     def test_no_local_schema_ddl_function(self):
@@ -420,6 +427,7 @@ class TestSchemaAlignment(unittest.TestCase):
 
 # ── state file tests ──────────────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestStateFile(unittest.TestCase):
 
     def test_state_file_required_keys(self):
@@ -458,6 +466,7 @@ class TestStateFile(unittest.TestCase):
 
 # ── PID file tests ────────────────────────────────────────────────────────────
 
+@pytest.mark.fast
 class TestPidFile(unittest.TestCase):
 
     def test_pid_file_written_by_emergency_flatten(self):
