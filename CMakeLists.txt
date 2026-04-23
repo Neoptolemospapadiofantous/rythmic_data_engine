@@ -76,6 +76,11 @@ add_executable(dashboard src/dashboard.cpp)
 target_link_libraries(dashboard PRIVATE rithmic_lib ${CURSES_LIBRARIES})
 target_include_directories(dashboard PRIVATE src/ ${CURSES_INCLUDE_DIRS})
 
+# ── orb_strategy (standalone ORB signal binary for CI parity tests) ──
+# Header-only nlohmann/json; no link deps beyond stdlib.
+add_executable(orb_strategy src/orb_strategy_main.cpp)
+target_compile_features(orb_strategy PRIVATE cxx_std_17)
+
 # ── Install ────────────────────────────────────────────────────────
 install(TARGETS rithmic_engine DESTINATION bin)
 install(DIRECTORY certs/ DESTINATION share/rithmic_engine/certs)
