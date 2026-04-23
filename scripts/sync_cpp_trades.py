@@ -9,14 +9,15 @@ defined by migrations/001_trades.sql and models.py.
 Idempotent: uses ON CONFLICT (symbol, entry_time, direction) DO UPDATE so it
 can be run multiple times without creating duplicates.
 
-Intended use: called automatically as part of the EOD process, and also
-manually when investigating trade discrepancies.
+Intended use: called automatically as part of the EOD process (via --eod flag
+or scripts/eod_summary.py), and also manually when investigating discrepancies.
 
 Usage:
     python scripts/sync_cpp_trades.py               # sync today only
     python scripts/sync_cpp_trades.py --date 2026-04-22
     python scripts/sync_cpp_trades.py --all          # all available history
     python scripts/sync_cpp_trades.py --dry-run      # show without writing
+    python scripts/sync_cpp_trades.py --eod          # sync today + write session_summary
 """
 from __future__ import annotations
 
@@ -225,6 +226,8 @@ def main() -> None:
                        help="Sync all available history from nq_trades")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would be synced without writing")
+    parser.add_argument("--eod", action="store_true",
+                        help="After syncing, write EOD session_summary for the synced date")
     args = parser.parse_args()
 
     if args.all:
@@ -245,6 +248,22 @@ def main() -> None:
         if result.get("errors", 0) > 0:
             log.warning("%d errors during sync — check logs above", result["errors"])
             sys.exit(1)
+
+        if args.eod and session_date is not None:
+            # Import here to avoid circular dependency if eod_summary imports this module.
+            import importlib.util
+            _eod_path = _ENGINE_DIR / "scripts" / "eod_summary.py"
+            spec = importlib.util.spec_from_file_location("eod_summary", _eod_path)
+            eod_mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(eod_mod)
+            eod_result = eod_mod.write_eod_summary(
+                session_date=session_date,
+                dry_run=args.dry_run,
+                cpp_sync=False,  # already synced above
+            )
+            log.info("EOD summary: %s", eod_result)
+        elif args.eod and session_date is None:
+            log.warning("--eod with --all is not supported; run eod_summary.py separately per date")
     finally:
         conn.close()
 
