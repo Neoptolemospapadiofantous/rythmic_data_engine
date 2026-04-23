@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NQ ORB — Live Trading Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: "Courier New", monospace;
+      background: #0d1117;
+      color: #c9d1d9;
+      min-height: 100vh;
+      padding: 1.5rem;
+    }
+    h1 { font-size: 1.2rem; color: #58a6ff; margin-bottom: 1.5rem; letter-spacing: 0.05em; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .card {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 1rem;
+    }
+    .card h2 { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #8b949e; margin-bottom: 0.75rem; }
+    .metric { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.4rem; }
+    .metric-label { font-size: 0.8rem; color: #8b949e; }
+    .metric-value { font-size: 0.9rem; font-weight: bold; }
+    .long  { color: #3fb950; }
+    .short { color: #f85149; }
+    .flat  { color: #8b949e; }
+    .pnl-positive { color: #3fb950; }
+    .pnl-negative { color: #f85149; }
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px;
+      border-radius: 50%; margin-right: 6px;
+    }
+    .connected    { background: #3fb950; }
+    .disconnected { background: #f85149; }
+    #kill-btn {
+      width: 100%;
+      padding: 0.6rem;
+      background: #da3633;
+      color: #fff;
+      border: none;
+      border-radius: 4px;
+      font-family: inherit;
+      font-size: 0.9rem;
+      font-weight: bold;
+      cursor: pointer;
+      letter-spacing: 0.04em;
+      transition: background 0.15s;
+    }
+    #kill-btn:hover:not(:disabled)  { background: #b91c1c; }
+    #kill-btn:disabled { background: #484f58; cursor: not-allowed; }
+    #kill-status { margin-top: 0.5rem; font-size: 0.78rem; min-height: 1.2em; }
+    .ok  { color: #3fb950; }
+    .err { color: #f85149; }
+    #reconnect-failures { color: #f85149; }
+  </style>
+</head>
+<body>
+  <h1>NQ ORB — Live Trading Dashboard</h1>
+
+  <div class="grid">
+
+    <!-- Position panel -->
+    <div class="card" role="region" aria-label="Current position">
+      <h2>Position</h2>
+      <div class="metric">
+        <span class="metric-label">Side</span>
+        <span class="metric-value flat" id="pos-side">FLAT</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Entry</span>
+        <span class="metric-value" id="pos-entry">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Stop loss</span>
+        <span class="metric-value" id="pos-sl">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Open P&amp;L</span>
+        <span class="metric-value" id="pos-pnl">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Daily P&amp;L / limit</span>
+        <span class="metric-value" id="daily-pnl">— / —</span>
+      </div>
+    </div>
+
+    <!-- Connection / feed health panel -->
+    <div class="card" role="region" aria-label="Connection status">
+      <h2>Feed Health</h2>
+      <div class="metric">
+        <span class="metric-label">Connection</span>
+        <span class="metric-value" id="conn-state">
+          <span class="status-dot disconnected" id="conn-dot" aria-hidden="true"></span>
+          <span id="conn-label">UNKNOWN</span>
+        </span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Last tick</span>
+        <span class="metric-value" id="last-tick">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Consecutive failures</span>
+        <span class="metric-value" id="reconnect-failures">—</span>
+      </div>
+      <div class="metric">
+        <span class="metric-label">Trader running</span>
+        <span class="metric-value" id="trader-running">—</span>
+      </div>
+    </div>
+
+    <!-- Kill switch panel -->
+    <div class="card" role="region" aria-label="Kill switch">
+      <h2>Emergency Controls</h2>
+      <button id="kill-btn"
+              aria-label="Emergency stop — send SIGTERM to live trader"
+              onclick="killTrader()">
+        &#9632; EMERGENCY STOP
+      </button>
+      <div id="kill-status" role="status" aria-live="polite"></div>
+    </div>
+
+  </div>
+
+  <script>
+    "use strict";
+
+    // ── Kill switch ────────────────────────────────────────────────────────────
+    async function killTrader() {
+      const btn = document.getElementById("kill-btn");
+      const status = document.getElementById("kill-status");
+
+      const confirmed = window.confirm(
+        "Send SIGTERM to live trader?\n\nThis will trigger emergency flatten and clean exit."
+      );
+      if (!confirmed) return;
+
+      btn.disabled = true;
+      status.textContent = "Sending SIGTERM…";
+      status.className = "";
+
+      try {
+        const res = await fetch("/api/live/kill", { method: "POST" });
+        const data = await res.json();
+        if (data.ok) {
+          status.textContent = `SIGTERM sent to PID ${data.pid}. Trader is shutting down.`;
+          status.className = "ok";
+        } else {
+          status.textContent = `Error: ${data.error}`;
+          status.className = "err";
+          btn.disabled = false;
+        }
+      } catch (err) {
+        status.textContent = `Network error: ${err.message}`;
+        status.className = "err";
+        btn.disabled = false;
+      }
+    }
+
+    // ── Status polling ─────────────────────────────────────────────────────────
+    async function pollStatus() {
+      try {
+        const res = await fetch("/api/live/status");
+        const data = await res.json();
+        document.getElementById("trader-running").textContent = data.running ? "YES" : "NO";
+        const btn = document.getElementById("kill-btn");
+        // Re-enable kill button only if trader is actually running
+        if (data.running) btn.disabled = false;
+      } catch (_) { /* ignore transient fetch errors */ }
+    }
+
+    // Poll process status every 5 seconds
+    pollStatus();
+    setInterval(pollStatus, 5000);
+  </script>
+</body>
+</html>
