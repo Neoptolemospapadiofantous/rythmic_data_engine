@@ -97,7 +97,7 @@ struct Metrics {
     std::string pos_side    = "FLAT";   // "LONG", "SHORT", or "FLAT"
     double      pos_entry   = 0.0;
     double      pos_sl      = 0.0;
-    double      daily_pnl   = 0.0;     // sum pnl_dollars for today's closed trades
+    double      daily_pnl   = 0.0;     // sum pnl for today's closed trades
     double      daily_limit = 0.0;     // daily_loss_limit from live_config.json
 
     // Reconnection panel
@@ -384,15 +384,15 @@ struct Pipeline {
                 if (res) PQclear(res);
             } catch (...) {}
 
-            // Open position for today (live_trader schema: entry_ts/exit_ts)
+            // Open position for today (canonical schema: entry_time/exit_time)
             try {
                 PGresult* res = PQexec(db->conn(),
                     "SELECT direction, entry_price,"
                     "  CASE WHEN stop_loss IS NOT NULL THEN stop_loss::text ELSE '' END"
                     " FROM trades"
-                    " WHERE exit_ts IS NULL"
+                    " WHERE exit_time IS NULL"
                     "   AND session_date = CURRENT_DATE"
-                    " ORDER BY entry_ts DESC LIMIT 1");
+                    " ORDER BY entry_time DESC LIMIT 1");
                 if (res && PQresultStatus(res) == PGRES_TUPLES_OK) {
                     std::lock_guard lk(g_metrics.mu);
                     if (PQntuples(res) > 0) {
@@ -412,10 +412,10 @@ struct Pipeline {
             // Daily closed P&L for today
             try {
                 PGresult* res = PQexec(db->conn(),
-                    "SELECT COALESCE(SUM(pnl_dollars), 0)"
+                    "SELECT COALESCE(SUM(pnl), 0)"
                     " FROM trades"
                     " WHERE session_date = CURRENT_DATE"
-                    "   AND exit_ts IS NOT NULL");
+                    "   AND exit_time IS NOT NULL");
                 if (res && PQresultStatus(res) == PGRES_TUPLES_OK &&
                     PQntuples(res) > 0) {
                     std::lock_guard lk(g_metrics.mu);
