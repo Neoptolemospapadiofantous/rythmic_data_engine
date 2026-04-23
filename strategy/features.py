@@ -74,7 +74,8 @@ def _fget(bar: dict, key: str, default: float = 0.0) -> float:
 
 
 def _ts(bar: dict) -> datetime.datetime:
-    ts = bar["timestamp"]
+    # Accept both 'timestamp' (test/backtest) and 'ts' (production live bars from DB)
+    ts = bar.get("timestamp") or bar.get("ts") or datetime.datetime.utcnow()
     if isinstance(ts, (int, float)):
         return datetime.datetime.utcfromtimestamp(ts)
     return ts
