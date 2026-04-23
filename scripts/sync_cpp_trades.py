@@ -159,6 +159,23 @@ def _cpp_row_to_trade(row: dict) -> Optional[Trade]:
         return None
 
 
+# ── EOD convenience wrapper ────────────────────────────────────────
+
+def run_eod_sync(conn: psycopg2.extensions.connection,
+                 session_date: Optional[date] = None) -> dict:
+    """Sync C++ nq_trades → unified trades for session_date (default: today).
+
+    Callable without side effects when nq_trades doesn't exist or is empty.
+    Returns the same result dict as sync(): {found, synced, skipped, errors}.
+
+    This function is the intended entry point for pipeline/EOD automation.
+    External callers should ensure Trade.ensure_schema(conn) has already run.
+    """
+    if session_date is None:
+        session_date = date.today()
+    return sync(conn, session_date, dry_run=False)
+
+
 # ── main sync logic ────────────────────────────────────────────────
 
 def sync(conn: psycopg2.extensions.connection,
