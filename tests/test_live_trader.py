@@ -359,13 +359,14 @@ class TestPositionReconciliation(unittest.TestCase):
         cfg = _make_config()
         strategy = MicroORBStrategy(cfg)
 
+        # Uses models.py column names (entry_time, not entry_ts)
         open_trade = {
             "id": 42,
             "direction": "LONG",
             "entry_price": 17010.0,
             "stop_loss": 17006.0,
             "target": 17022.0,
-            "entry_ts": datetime.datetime.now(tz=ET),
+            "entry_time": datetime.datetime.now(tz=ET),
             "session_date": datetime.date.today(),
         }
 
@@ -382,6 +383,94 @@ class TestPositionReconciliation(unittest.TestCase):
         self.assertEqual(strategy.state, StrategyState.IN_POSITION)
         self.assertIsNotNone(strategy.current_position())
         self.assertEqual(strategy.current_position().direction, "LONG")
+
+
+# ── schema alignment tests ────────────────────────────────────────────────────
+
+class TestSchemaAlignment(unittest.TestCase):
+
+    def test_no_local_schema_ddl_function(self):
+        """live_trader must not define _ensure_trades_schema; use models instead."""
+        import live_trader
+        self.assertFalse(
+            callable(getattr(live_trader, "_ensure_trades_schema", None)),
+            "_ensure_trades_schema must be removed; use Trade.ensure_schema() from models",
+        )
+
+    def test_reconcile_uses_exit_time_column(self):
+        """_reconcile_position SQL must use exit_time (models schema), not exit_ts."""
+        import live_trader
+        import inspect
+        src = inspect.getsource(live_trader._reconcile_position)
+        self.assertIn("exit_time", src, "_reconcile_position must query exit_time (models column)")
+        self.assertNotIn("exit_ts", src, "_reconcile_position must NOT use legacy exit_ts column")
+
+    def test_reconcile_uses_entry_time_column(self):
+        """_reconcile_position SQL must ORDER BY entry_time (models schema), not entry_ts."""
+        import live_trader
+        import inspect
+        src = inspect.getsource(live_trader._reconcile_position)
+        self.assertIn("entry_time", src, "_reconcile_position must use entry_time (models column)")
+        self.assertNotIn("entry_ts", src, "_reconcile_position must NOT use legacy entry_ts column")
+
+
+# ── state file tests ──────────────────────────────────────────────────────────
+
+class TestStateFile(unittest.TestCase):
+
+    def test_state_file_required_keys(self):
+        """_write_state must produce JSON with the required state schema keys."""
+        import live_trader
+        cfg = _make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+            cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+            trader = live_trader.LiveTrader(cfg, dry_run=True)
+            # Call _write_state directly (conn is None — _write_state handles that)
+            trader._write_state("CONNECTED")
+            state_path = Path(cfg["state_path"])
+            self.assertTrue(state_path.exists(), "state file must exist after _write_state()")
+            state = json.loads(state_path.read_text())
+            required = {"position", "entry_price", "sl", "unrealized_pnl",
+                        "daily_pnl", "connection", "reconnect_failures", "last_tick_ts"}
+            for key in required:
+                self.assertIn(key, state, f"state file missing required key: {key}")
+
+    def test_state_file_flat_position_when_no_trade(self):
+        """_write_state must show position=FLAT when strategy has no position."""
+        import live_trader
+        cfg = _make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+            cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+            trader = live_trader.LiveTrader(cfg, dry_run=True)
+            trader._write_state("CONNECTED")
+            state = json.loads(Path(cfg["state_path"]).read_text())
+            self.assertEqual(state["position"], "FLAT")
+            self.assertIsNone(state["entry_price"])
+            self.assertIsNone(state["sl"])
+            self.assertEqual(state["connection"], "CONNECTED")
+
+
+# ── PID file tests ────────────────────────────────────────────────────────────
+
+class TestPidFile(unittest.TestCase):
+
+    def test_pid_file_written_by_emergency_flatten(self):
+        """_emergency_flatten must remove the PID file (process is exiting)."""
+        import live_trader
+        cfg = _make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_path = Path(tmpdir) / "live_trader.pid"
+            state_path = Path(tmpdir) / "live_state.json"
+            cfg["pid_path"] = str(pid_path)
+            cfg["state_path"] = str(state_path)
+            trader = live_trader.LiveTrader(cfg, dry_run=True)
+            # Simulate PID file existing before emergency flatten
+            pid_path.write_text(str(os.getpid()))
+            self.assertTrue(pid_path.exists())
+            trader._emergency_flatten("TEST")
+            self.assertFalse(pid_path.exists(), "PID file must be removed by _emergency_flatten")
 
 
 if __name__ == "__main__":

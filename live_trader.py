@@ -47,6 +47,7 @@ except ImportError:
             key, _, val = line.partition("=")
             os.environ.setdefault(key.strip(), val.strip())
 
+from models import Trade, SessionSummary
 from strategy import MicroORBStrategy, Signal
 
 # ── constants ─────────────────────────────────────────────────────────────────
@@ -135,43 +136,6 @@ def _pg_connect_with_retry(config: dict, log: logging.Logger):
     raise RuntimeError("PostgreSQL unavailable after %d attempts" % max_retries)
 
 
-def _ensure_trades_schema(conn) -> None:
-    """Create trades and session_summaries tables if they don't exist."""
-    with conn.cursor() as cur:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trades (
-                id              BIGSERIAL PRIMARY KEY,
-                session_date    DATE            NOT NULL,
-                symbol          VARCHAR(32)     NOT NULL DEFAULT 'NQ',
-                direction       CHAR(5)         NOT NULL,
-                entry_price     DOUBLE PRECISION NOT NULL,
-                exit_price      DOUBLE PRECISION,
-                stop_loss       DOUBLE PRECISION,
-                target          DOUBLE PRECISION,
-                entry_ts        TIMESTAMPTZ     NOT NULL,
-                exit_ts         TIMESTAMPTZ,
-                pnl_points      DOUBLE PRECISION,
-                pnl_dollars     DOUBLE PRECISION,
-                exit_reason     VARCHAR(32),
-                dry_run         BOOLEAN         NOT NULL DEFAULT TRUE,
-                created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-            );
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS session_summaries (
-                id              BIGSERIAL PRIMARY KEY,
-                session_date    DATE            NOT NULL UNIQUE,
-                symbol          VARCHAR(32)     NOT NULL DEFAULT 'NQ',
-                trade_count     INTEGER         NOT NULL DEFAULT 0,
-                gross_pnl_pts   DOUBLE PRECISION,
-                gross_pnl_usd   DOUBLE PRECISION,
-                dry_run         BOOLEAN         NOT NULL DEFAULT TRUE,
-                exit_reason     VARCHAR(64),
-                created_at      TIMESTAMPTZ     NOT NULL DEFAULT NOW()
-            );
-        """)
-    conn.commit()
-
 
 # ── position reconciliation ───────────────────────────────────────────────────
 
@@ -187,11 +151,11 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
         cur.execute("""
             SELECT * FROM trades
             WHERE session_date = %s
-              AND exit_ts IS NULL
-              AND dry_run = %s
-            ORDER BY entry_ts DESC
+              AND exit_time IS NULL
+              AND source = 'python'
+            ORDER BY entry_time DESC
             LIMIT 1
-        """, (today, config.get("dry_run", True)))
+        """, (today,))
         row = cur.fetchone()
 
     if row is None:
@@ -238,18 +202,17 @@ def _submit_order(signal: Signal, config: dict, dry_run: bool, log: logging.Logg
 
 def _write_trade_open(conn, session_date: datetime.date, signal: Signal,
                       order_id: str, dry_run: bool) -> int:
-    with conn.cursor() as cur:
-        cur.execute("""
-            INSERT INTO trades
-                (session_date, symbol, direction, entry_price, stop_loss, target,
-                 entry_ts, dry_run)
-            VALUES (%s, 'NQ', %s, %s, %s, %s, %s, %s)
-            RETURNING id
-        """, (session_date, signal.direction, signal.entry_price,
-               signal.stop_loss, signal.target, signal.bar_ts, dry_run))
-        trade_id = cur.fetchone()["id"]
-    conn.commit()
-    return trade_id
+    t = Trade(
+        session_date=session_date,
+        symbol="NQ",
+        direction=signal.direction,
+        entry_price=signal.entry_price,
+        stop_loss=signal.stop_loss,
+        target=signal.target,
+        entry_time=signal.bar_ts,
+        dry_run=dry_run,
+    )
+    return t.save(conn)
 
 
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,
@@ -265,8 +228,8 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
         pnl_usd = pts * point_value
         cur.execute("""
             UPDATE trades
-            SET exit_price = %s, exit_ts = %s, pnl_points = %s,
-                pnl_dollars = %s, exit_reason = %s
+            SET exit_price = %s, exit_time = %s, pnl_points = %s,
+                pnl = %s, exit_reason = %s, updated_at = NOW()
             WHERE id = %s
         """, (exit_price, exit_ts, pts, pnl_usd, exit_reason, trade_id))
     conn.commit()
@@ -274,26 +237,11 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
 
 def _write_session_summary(conn, session_date: datetime.date, dry_run: bool,
                             exit_reason: str) -> None:
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT COUNT(*) AS cnt,
-                   COALESCE(SUM(pnl_points), 0)  AS pts,
-                   COALESCE(SUM(pnl_dollars), 0) AS usd
-            FROM trades
-            WHERE session_date = %s AND dry_run = %s
-        """, (session_date, dry_run))
-        agg = cur.fetchone()
-        cur.execute("""
-            INSERT INTO session_summaries
-                (session_date, trade_count, gross_pnl_pts, gross_pnl_usd, dry_run, exit_reason)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (session_date) DO UPDATE
-            SET trade_count   = EXCLUDED.trade_count,
-                gross_pnl_pts = EXCLUDED.gross_pnl_pts,
-                gross_pnl_usd = EXCLUDED.gross_pnl_usd,
-                exit_reason   = EXCLUDED.exit_reason
-        """, (session_date, agg["cnt"], agg["pts"], agg["usd"], dry_run, exit_reason))
-    conn.commit()
+    trades = Trade.for_date(conn, session_date)
+    completed = [t for t in trades if t.exit_time is not None]
+    summary = SessionSummary.build_from_trades(completed)
+    summary.notes = exit_reason
+    summary.save(conn)
 
 
 # ── poll helpers ──────────────────────────────────────────────────────────────
@@ -430,7 +378,8 @@ class LiveTrader:
         self._pid_path.write_text(str(os.getpid()))
 
         self._conn = _pg_connect_with_retry(self._config, self._log)
-        _ensure_trades_schema(self._conn)
+        Trade.ensure_schema(self._conn)
+        SessionSummary.ensure_schema(self._conn)
 
         # Real position reconciliation — queries DB, does NOT just write a warning file
         _reconcile_position(self._conn, self._config, self._strategy, self._log)
@@ -623,7 +572,7 @@ def _make_position_from_db(self, row: dict):
         entry_price=float(row["entry_price"]),
         stop_loss=float(row["stop_loss"]) if row.get("stop_loss") else 0.0,
         target=float(row["target"]) if row.get("target") else 0.0,
-        entry_ts=row["entry_ts"],
+        entry_ts=row["entry_time"],
     )
     return p
 
