@@ -355,6 +355,138 @@ class TestGoLiveGates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Gate F — ML model checksum tests
+# ---------------------------------------------------------------------------
+
+class TestGateMLChecksum(unittest.TestCase):
+    """Gate F: ML model file existence + sha256 checksum verification."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        # Minimal config pointing at temp dir
+        self.cfg = {
+            "dry_run": True,
+            "ml": {"enabled": True, "model_path": str(self.tmp / "model.pkl")},
+        }
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _gate(self, checksums_path=None):
+        import go_live as gl
+        original = gl.CHECKSUMS_PATH
+        if checksums_path is not None:
+            gl.CHECKSUMS_PATH = checksums_path
+        try:
+            return gl._gate_ml_model(self.cfg)
+        finally:
+            gl.CHECKSUMS_PATH = original
+
+    def test_model_missing_fails(self):
+        result = self._gate()
+        self.assertFalse(result.passed)
+
+    def test_model_exists_no_checksums_file_passes(self):
+        (self.tmp / "model.pkl").write_bytes(b"fake-model")
+        result = self._gate(checksums_path=self.tmp / "nonexistent_checksums.json")
+        self.assertTrue(result.passed)
+        self.assertIn("no checksum file", result.detail)
+
+    def test_model_exists_checksum_matches_passes(self):
+        model = self.tmp / "model.pkl"
+        model.write_bytes(b"fake-model")
+        import hashlib, go_live as gl
+        actual_hash = hashlib.sha256(b"fake-model").hexdigest()
+        checksums_path = self.tmp / "checksums.json"
+        checksums_path.write_text(json.dumps({str(model): actual_hash}))
+        result = self._gate(checksums_path=checksums_path)
+        self.assertTrue(result.passed)
+        self.assertIn("sha256 OK", result.detail)
+
+    def test_model_exists_checksum_mismatch_fails(self):
+        model = self.tmp / "model.pkl"
+        model.write_bytes(b"fake-model")
+        checksums_path = self.tmp / "checksums.json"
+        checksums_path.write_text(json.dumps({str(model): "a" * 64}))  # wrong hash
+        result = self._gate(checksums_path=checksums_path)
+        self.assertFalse(result.passed)
+        self.assertIn("MISMATCH", result.detail)
+
+    def test_model_path_not_in_checksums_file_passes_with_note(self):
+        model = self.tmp / "model.pkl"
+        model.write_bytes(b"fake-model")
+        checksums_path = self.tmp / "checksums.json"
+        checksums_path.write_text(json.dumps({"other/path.pkl": "a" * 64}))
+        result = self._gate(checksums_path=checksums_path)
+        self.assertTrue(result.passed)
+        self.assertIn("no expected hash", result.detail)
+
+    def test_update_checksums_writes_file(self):
+        model = self.tmp / "model.pkl"
+        model.write_bytes(b"fake-model")
+        cfg = {"ml": {"model_path": str(model), "scaler_path": ""}}
+        import go_live as gl
+        original = gl.CHECKSUMS_PATH
+        checksums_out = self.tmp / "checksums_out.json"
+        gl.CHECKSUMS_PATH = checksums_out
+        try:
+            gl.update_checksums(cfg)
+        finally:
+            gl.CHECKSUMS_PATH = original
+        data = json.loads(checksums_out.read_text())
+        import hashlib
+        self.assertEqual(data[str(model)], hashlib.sha256(b"fake-model").hexdigest())
+
+
+# ---------------------------------------------------------------------------
+# Gate J — account equity tests
+# ---------------------------------------------------------------------------
+
+class TestGateAccountEquity(unittest.TestCase):
+    """Gate J: account equity above minimum (via PNL_PLANT_EQUITY env var)."""
+
+    def _gate(self, equity_env: str | None, cfg: dict | None = None):
+        import go_live as gl
+        if cfg is None:
+            cfg = {"prop_firm": {"trailing_drawdown_limit": 2500.0}}
+        env = {}
+        if equity_env is not None:
+            env["PNL_PLANT_EQUITY"] = equity_env
+        with patch.dict(os.environ, env, clear=False):
+            # Ensure the var is absent when None
+            if equity_env is None:
+                os.environ.pop("PNL_PLANT_EQUITY", None)
+            return gl._gate_account_equity(cfg)
+
+    def test_env_var_absent_skips(self):
+        result = self._gate(equity_env=None)
+        self.assertTrue(result.passed)
+        self.assertIn("SKIP", result.detail)
+
+    def test_equity_above_minimum_passes(self):
+        # trailing_drawdown_limit=2500 → minimum=1250; equity=50000 → pass
+        result = self._gate(equity_env="50000")
+        self.assertTrue(result.passed)
+        self.assertIn("≥", result.detail)
+
+    def test_equity_below_minimum_fails(self):
+        # minimum = 2500 * 0.5 = 1250; equity=100 → fail
+        result = self._gate(equity_env="100")
+        self.assertFalse(result.passed)
+        self.assertIn("<", result.detail)
+
+    def test_invalid_equity_value_fails(self):
+        result = self._gate(equity_env="not-a-number")
+        self.assertFalse(result.passed)
+        self.assertIn("not a valid number", result.detail)
+
+    def test_zero_trailing_drawdown_no_minimum(self):
+        # If no trailing drawdown limit configured, minimum=0; any positive equity passes
+        result = self._gate(equity_env="1", cfg={"prop_firm": {"trailing_drawdown_limit": 0}})
+        self.assertTrue(result.passed)
+
+
+# ---------------------------------------------------------------------------
 # integration smoke test (importability / CLI help)
 # ---------------------------------------------------------------------------
 
@@ -372,6 +504,30 @@ class TestGoLiveCLI(unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             go_live.main(["--help"])
         self.assertEqual(ctx.exception.code, 0)
+
+    def test_update_checksums_flag_exits_zero(self):
+        """--update-checksums must exit cleanly without running preflight gates."""
+        import go_live
+        with tempfile.TemporaryDirectory() as td:
+            cfg_path = Path(td) / "config" / "live_config.json"
+            cfg_path.parent.mkdir()
+            cfg_path.write_text(json.dumps({
+                "dry_run": True,
+                "ml": {"enabled": True, "model_path": "nonexistent.pkl", "scaler_path": ""},
+                "prop_firm": {}, "rithmic": {}, "no_deploy_path": str(Path(td) / "NO_DEPLOY"),
+            }))
+            import go_live as gl
+            original_config = gl.CONFIG_PATH
+            original_checksums = gl.CHECKSUMS_PATH
+            gl.CONFIG_PATH = cfg_path
+            gl.CHECKSUMS_PATH = Path(td) / "checksums.json"
+            try:
+                code, results = gl.run_preflight(["--update-checksums"])
+            finally:
+                gl.CONFIG_PATH = original_config
+                gl.CHECKSUMS_PATH = original_checksums
+        self.assertEqual(code, 0)
+        self.assertEqual(results, [])
 
 
 if __name__ == "__main__":
