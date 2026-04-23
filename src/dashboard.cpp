@@ -6,10 +6,12 @@
 //   CONNECTION  |  LIVE TICK
 //   RATES       |  1-MIN BAR
 //   PIPELINE    |  BUFFER
+//   POSITION    |  RECONNECT
 //   AUDIT LOG
 //
 // Usage:  ./build/dashboard  [path/to/.env]
 // Quit:   q or Ctrl-C
+// Kill live_trader:  k
 
 // ncurses.h must come LAST — it defines macros (timeout, erase, etc.)
 // that corrupt Boost header parsing if included first.
@@ -19,10 +21,14 @@
 #include <clocale>
 #include <csignal>
 #include <cstdio>
+#include <cstring>
 #include <deque>
+#include <dirent.h>
+#include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <sys/types.h>
 #include <thread>
 #include <vector>
 
@@ -49,6 +55,7 @@ enum : int {
     C_LABEL  = 4,   // yellow     — field labels
     C_VALUE  = 5,   // white      — data values
     C_DIM    = 6,   // dim white  — secondary info
+    C_WARN   = 7,   // magenta    — warning / kill confirmation
 };
 
 // ── Shared state (Asio thread writes, ncurses thread reads) ────────
@@ -85,10 +92,82 @@ struct Metrics {
 
     // Audit tail — last 5 formatted rows from audit_log
     std::vector<std::string> audit_tail;
+
+    // Position panel (polled from trades table every 5 s)
+    std::string pos_side    = "FLAT";   // "LONG", "SHORT", or "FLAT"
+    double      pos_entry   = 0.0;
+    double      pos_sl      = 0.0;
+    double      daily_pnl   = 0.0;     // sum pnl_dollars for today's closed trades
+    double      daily_limit = 0.0;     // daily_loss_limit from live_config.json
+
+    // Reconnection panel
+    int         recon_failures = 0;    // consecutive reconnect events this session
+    int64_t     last_tick_ms   = 0;    // system-clock ms of last received tick
+    std::string conn_state     = "INIT";
 };
 
 static Metrics           g_metrics;
 static std::atomic<bool> g_stop{false};
+
+// ── Helper: parse daily_loss_limit from config/live_config.json ────
+
+static double read_daily_limit(const char* path = "config/live_config.json") {
+    std::ifstream f(path);
+    if (!f.is_open()) return 0.0;
+    std::string line;
+    while (std::getline(f, line)) {
+        auto pos = line.find("\"daily_loss_limit\"");
+        if (pos == std::string::npos) continue;
+        auto colon = line.find(':', pos);
+        if (colon == std::string::npos) continue;
+        try { return std::stod(line.substr(colon + 1)); } catch (...) {}
+    }
+    return 0.0;
+}
+
+// ── Helper: find PID of live_trader.py ────────────────────────────
+
+static pid_t find_live_trader_pid() {
+    // Check common PID file locations first
+    for (const char* pf : {"/tmp/live_trader.pid", "/run/live_trader.pid"}) {
+        std::ifstream f(pf);
+        if (!f.is_open()) continue;
+        pid_t pid = 0;
+        f >> pid;
+        if (pid > 0 && kill(pid, 0) == 0) return pid;
+    }
+    // Fall back: scan /proc/*/cmdline for "live_trader.py"
+    DIR* proc = opendir("/proc");
+    if (!proc) return -1;
+    struct dirent* ent;
+    while ((ent = readdir(proc)) != nullptr) {
+        bool all_dig = true;
+        for (const char* p = ent->d_name; *p; ++p)
+            if (!isdigit(static_cast<unsigned char>(*p))) { all_dig = false; break; }
+        if (!all_dig) continue;
+
+        char path[320];
+        std::snprintf(path, sizeof(path), "/proc/%s/cmdline", ent->d_name);
+        FILE* cf = std::fopen(path, "r");
+        if (!cf) continue;
+
+        char buf[512] = {};
+        std::size_t nr = std::fread(buf, 1, sizeof(buf) - 1, cf);
+        std::fclose(cf);
+        if (nr == 0) continue;  // kernel threads have empty cmdline
+
+        // cmdline is NUL-delimited; replace NULs so strstr works across args
+        for (std::size_t i = 0; i < nr; ++i)
+            if (buf[i] == '\0') buf[i] = ' ';
+
+        if (std::strstr(buf, "live_trader.py")) {
+            closedir(proc);
+            return static_cast<pid_t>(std::atoi(ent->d_name));
+        }
+    }
+    closedir(proc);
+    return -1;
+}
 
 // ── Pipeline (runs in Asio background thread) ──────────────────────
 
@@ -128,7 +207,8 @@ struct Pipeline {
 
         {
             std::lock_guard lk(g_metrics.mu);
-            g_metrics.pg_up = true;
+            g_metrics.pg_up       = true;
+            g_metrics.daily_limit = read_daily_limit();
         }
     }
 
@@ -196,17 +276,27 @@ struct Pipeline {
 
         {
             std::lock_guard lk(g_metrics.mu);
-            g_metrics.price     = r.price;
-            g_metrics.qty       = r.size;
-            g_metrics.is_buy    = r.is_buy;
-            g_metrics.wire_us   = wire;
-            ++g_metrics.session_ticks;
+            g_metrics.price   = r.price;
+            g_metrics.qty     = r.size;
+            g_metrics.is_buy  = r.is_buy;
+            g_metrics.wire_us = wire;
 
-            if (!g_metrics.rithmic_up) {
-                g_metrics.rithmic_up = true;
+            // Detect reconnection: rithmic_up was false, now receiving ticks again
+            bool was_down = !g_metrics.rithmic_up && g_metrics.session_ticks > 0;
+            if (was_down) {
+                ++g_metrics.recon_failures;
+                g_metrics.conn_state = "RECONNECTED";
+            } else if (g_metrics.conn_state != "RECONNECTED") {
+                g_metrics.conn_state = "STREAMING";
+            }
+
+            ++g_metrics.session_ticks;
+            g_metrics.rithmic_up   = true;
+            g_metrics.last_tick_ms = now_us / 1000;
+
+            if (g_metrics.status_msg.rfind("streaming", 0) != 0)
                 g_metrics.status_msg =
                     "streaming " + cfg.symbol + "/" + cfg.exchange;
-            }
 
             // Rolling 60-second rate window
             int64_t now_ms = now_us / 1000;
@@ -293,6 +383,46 @@ struct Pipeline {
                 }
                 if (res) PQclear(res);
             } catch (...) {}
+
+            // Open position for today (live_trader schema: entry_ts/exit_ts)
+            try {
+                PGresult* res = PQexec(db->conn(),
+                    "SELECT direction, entry_price,"
+                    "  CASE WHEN stop_loss IS NOT NULL THEN stop_loss::text ELSE '' END"
+                    " FROM trades"
+                    " WHERE exit_ts IS NULL"
+                    "   AND session_date = CURRENT_DATE"
+                    " ORDER BY entry_ts DESC LIMIT 1");
+                if (res && PQresultStatus(res) == PGRES_TUPLES_OK) {
+                    std::lock_guard lk(g_metrics.mu);
+                    if (PQntuples(res) > 0) {
+                        g_metrics.pos_side  = PQgetvalue(res, 0, 0);
+                        g_metrics.pos_entry = std::stod(PQgetvalue(res, 0, 1));
+                        const char* sl_str  = PQgetvalue(res, 0, 2);
+                        g_metrics.pos_sl    = sl_str[0] ? std::stod(sl_str) : 0.0;
+                    } else {
+                        g_metrics.pos_side  = "FLAT";
+                        g_metrics.pos_entry = 0.0;
+                        g_metrics.pos_sl    = 0.0;
+                    }
+                }
+                if (res) PQclear(res);
+            } catch (...) {}
+
+            // Daily closed P&L for today
+            try {
+                PGresult* res = PQexec(db->conn(),
+                    "SELECT COALESCE(SUM(pnl_dollars), 0)"
+                    " FROM trades"
+                    " WHERE session_date = CURRENT_DATE"
+                    "   AND exit_ts IS NOT NULL");
+                if (res && PQresultStatus(res) == PGRES_TUPLES_OK &&
+                    PQntuples(res) > 0) {
+                    std::lock_guard lk(g_metrics.mu);
+                    g_metrics.daily_pnl = std::stod(PQgetvalue(res, 0, 0));
+                }
+                if (res) PQclear(res);
+            } catch (...) {}
         }
     }
 
@@ -347,6 +477,12 @@ static void render() {
     std::vector<std::string> audit_tail;
     double tps5 = 0, tpm60 = 0;
 
+    std::string pos_side;
+    double      pos_entry, pos_sl, daily_pnl, daily_limit;
+    int         recon_failures;
+    int64_t     last_tick_ms;
+    std::string conn_state;
+
     {
         std::lock_guard lk(g_metrics.mu);
         rithmic_up     = g_metrics.rithmic_up;
@@ -366,6 +502,15 @@ static void render() {
         bar_vol = g_metrics.bar_vol; bar_ts = g_metrics.bar_ts;
         audit_tail = g_metrics.audit_tail;
 
+        pos_side       = g_metrics.pos_side;
+        pos_entry      = g_metrics.pos_entry;
+        pos_sl         = g_metrics.pos_sl;
+        daily_pnl      = g_metrics.daily_pnl;
+        daily_limit    = g_metrics.daily_limit;
+        recon_failures = g_metrics.recon_failures;
+        last_tick_ms   = g_metrics.last_tick_ms;
+        conn_state     = g_metrics.conn_state;
+
         if (!g_metrics.rate_ms.empty()) {
             int64_t now_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -379,6 +524,17 @@ static void render() {
         }
     }
 
+    int64_t now_ms_render =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+
+    // Compute unrealized P&L for open position using live price
+    double trade_pnl = 0.0;
+    if (pos_side == "LONG" && pos_entry > 0 && price > 0)
+        trade_pnl = (price - pos_entry) * 20.0;
+    else if (pos_side == "SHORT" && pos_entry > 0 && price > 0)
+        trade_pnl = (pos_entry - price) * 20.0;
+
     int cols   = getmaxx(stdscr);
     int midcol = 40;
 
@@ -388,7 +544,7 @@ static void render() {
     set_color(C_HEADER, A_BOLD | A_REVERSE);
     mvhline(0, 0, ' ', cols);
     mvprintw(0, 2, " RITHMIC ENGINE  live dashboard "
-                   " (q=quit)");
+                   " (q=quit  k=kill live_trader)");
     set_color(C_VALUE);
 
     // ── Row 2-5: CONNECTION (left) / LIVE TICK (right) ───────────
@@ -515,8 +671,103 @@ static void render() {
     set_color(C_DIM);
     mvhline(r, 0, ACS_HLINE, cols);
 
-    // ── Row 18+: AUDIT LOG ────────────────────────────────────────
+    // ── Row 18-22: POSITION (left) / RECONNECT (right) ───────────
     r = 18;
+    draw_section(r, 1, "POSITION");
+    draw_section(r, midcol, "RECONNECT");
+
+    // Side indicator with color
+    draw_label(r+1, 1, "Side:");
+    if (pos_side == "LONG")        { set_color(C_OK);  printw("LONG  ▲"); }
+    else if (pos_side == "SHORT")  { set_color(C_ERR); printw("SHORT ▼"); }
+    else                           { set_color(C_DIM); printw("FLAT  —"); }
+
+    // Entry price
+    set_color(C_VALUE);
+    draw_label(r+2, 1, "Entry:");
+    if (pos_entry > 0) printw("%.2f", pos_entry);
+    else               printw("--");
+
+    // Stop loss
+    draw_label(r+3, 1, "Stop loss:");
+    if (pos_sl > 0) {
+        set_color(C_ERR);
+        printw("%.2f", pos_sl);
+    } else {
+        set_color(C_DIM);
+        printw("--");
+    }
+
+    // Trade P&L (unrealized if in position)
+    set_color(C_VALUE);
+    draw_label(r+4, 1, "Trade P&L:");
+    if (pos_side != "FLAT" && pos_entry > 0 && price > 0) {
+        if (trade_pnl >= 0) { set_color(C_OK);  printw("+$%.2f", trade_pnl); }
+        else                { set_color(C_ERR); printw("-$%.2f", -trade_pnl); }
+        set_color(C_DIM);
+        printw("  (unrealized)");
+    } else {
+        set_color(C_DIM);
+        printw("--");
+    }
+
+    // Daily P&L vs limit
+    set_color(C_VALUE);
+    draw_label(r+5, 1, "Daily P&L:");
+    if (daily_pnl >= 0) { set_color(C_OK);  printw("+$%.2f", daily_pnl); }
+    else                { set_color(C_ERR); printw("-$%.2f", -daily_pnl); }
+    if (daily_limit > 0) {
+        set_color(C_DIM);
+        printw(" / limit -$%.0f", daily_limit);
+    }
+
+    // ── RECONNECT panel (right) ────────────────────────────────
+
+    // Connection state
+    draw_label(r+1, midcol, "State:");
+    if (conn_state == "STREAMING")   { set_color(C_OK);   printw("STREAMING"); }
+    else if (conn_state == "RECONNECTED") { set_color(C_WARN); printw("RECONNECTED"); }
+    else if (conn_state == "STALE")  { set_color(C_ERR);  printw("STALE — no ticks"); }
+    else                             { set_color(C_DIM);  printw("%s", conn_state.c_str()); }
+
+    // Time since last tick
+    set_color(C_VALUE);
+    draw_label(r+2, midcol, "Last tick:");
+    if (last_tick_ms > 0) {
+        int64_t secs = (now_ms_render - last_tick_ms) / 1000;
+        if (secs < 5)        { set_color(C_OK);   printw("%llds ago", (long long)secs); }
+        else if (secs < 30)  { set_color(C_WARN); printw("%llds ago", (long long)secs); }
+        else                 { set_color(C_ERR);  printw("%llds ago", (long long)secs); }
+    } else {
+        set_color(C_DIM);
+        printw("no ticks yet");
+    }
+
+    // Consecutive reconnect events
+    set_color(C_VALUE);
+    draw_label(r+3, midcol, "Reconnects:");
+    if (recon_failures == 0) { set_color(C_OK);  printw("0"); }
+    else                     { set_color(C_WARN); printw("%d", recon_failures); }
+
+    // Feed health summary
+    set_color(C_VALUE);
+    draw_label(r+4, midcol, "Feed health:");
+    bool stale = last_tick_ms > 0 && (now_ms_render - last_tick_ms) > 30000;
+    if (!rithmic_up || stale) {
+        set_color(C_ERR);
+        printw("[!!] DEGRADED");
+    } else {
+        set_color(C_OK);
+        printw("[OK] nominal");
+    }
+
+    // ── Separator ────────────────────────────────────────────────
+    r = 24;
+    set_color(C_DIM);
+    mvhline(r, 0, ACS_HLINE, cols);
+
+    // ── Row 25+: AUDIT LOG ────────────────────────────────────────
+    r = 25;
     draw_section(r, 1, "AUDIT LOG");
 
     if (audit_tail.empty()) {
@@ -535,7 +786,7 @@ static void render() {
     int bottom = getmaxy(stdscr) - 1;
     set_color(C_DIM);
     mvhline(bottom, 0, ACS_HLINE, cols);
-    mvprintw(bottom, 2, " q=quit  Ctrl-C=quit ");
+    mvprintw(bottom, 2, " q=quit  Ctrl-C=quit  k=kill live_trader ");
 
     refresh();
 }
@@ -591,12 +842,13 @@ int main(int argc, char* argv[]) {
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(C_HEADER, COLOR_CYAN,   -1);
-        init_pair(C_OK,     COLOR_GREEN,  -1);
-        init_pair(C_ERR,    COLOR_RED,    -1);
-        init_pair(C_LABEL,  COLOR_YELLOW, -1);
-        init_pair(C_VALUE,  COLOR_WHITE,  -1);
-        init_pair(C_DIM,    COLOR_WHITE,  -1);
+        init_pair(C_HEADER, COLOR_CYAN,    -1);
+        init_pair(C_OK,     COLOR_GREEN,   -1);
+        init_pair(C_ERR,    COLOR_RED,     -1);
+        init_pair(C_LABEL,  COLOR_YELLOW,  -1);
+        init_pair(C_VALUE,  COLOR_WHITE,   -1);
+        init_pair(C_DIM,    COLOR_WHITE,   -1);
+        init_pair(C_WARN,   COLOR_MAGENTA, -1);
     }
 
     // ── Render loop at 10 fps ─────────────────────────────────────
@@ -605,6 +857,17 @@ int main(int argc, char* argv[]) {
         if (ch == 'q' || ch == 'Q') {
             g_stop.store(true);
             break;
+        }
+        if (ch == 'k' || ch == 'K') {
+            pid_t pid = find_live_trader_pid();
+            std::lock_guard lk(g_metrics.mu);
+            if (pid > 0) {
+                kill(pid, SIGTERM);
+                g_metrics.status_msg = "SIGTERM sent to live_trader pid="
+                                       + std::to_string(pid);
+            } else {
+                g_metrics.status_msg = "live_trader not found (not running?)";
+            }
         }
         render();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
