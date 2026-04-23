@@ -247,12 +247,13 @@ class SessionSummary:
     end_equity: Optional[float] = None
     notes: Optional[str] = None
     source: str = "python"
+    crash_exit: bool = False   # True when written by crash/SIGTERM handler
 
     # ── schema ────────────────────────────────────────────────────
 
     @staticmethod
     def ensure_schema(conn: psycopg2.extensions.connection) -> None:
-        """Create session_summary table if it doesn't exist (idempotent)."""
+        """Create session_summary table and add any missing columns (idempotent)."""
         with conn.cursor() as cur:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS session_summary (
@@ -267,11 +268,17 @@ class SessionSummary:
                     start_equity  DOUBLE PRECISION,
                     end_equity    DOUBLE PRECISION,
                     notes         TEXT,
+                    crash_exit    BOOLEAN          NOT NULL DEFAULT FALSE,
                     created_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW(),
                     updated_at    TIMESTAMPTZ      NOT NULL DEFAULT NOW()
                 );
                 CREATE INDEX IF NOT EXISTS idx_session_summary_date
                     ON session_summary (date);
+            """)
+            # Additive: add crash_exit if table already existed without it.
+            cur.execute("""
+                ALTER TABLE session_summary
+                    ADD COLUMN IF NOT EXISTS crash_exit BOOLEAN NOT NULL DEFAULT FALSE;
             """)
         conn.commit()
 
@@ -283,11 +290,11 @@ class SessionSummary:
             cur.execute("""
                 INSERT INTO session_summary (
                     session_id, date, source, gross_pnl, trade_count, win_count,
-                    max_drawdown, start_equity, end_equity, notes
+                    max_drawdown, start_equity, end_equity, notes, crash_exit
                 ) VALUES (
                     %(session_id)s, %(date)s, %(source)s, %(gross_pnl)s,
                     %(trade_count)s, %(win_count)s, %(max_drawdown)s,
-                    %(start_equity)s, %(end_equity)s, %(notes)s
+                    %(start_equity)s, %(end_equity)s, %(notes)s, %(crash_exit)s
                 )
                 ON CONFLICT (session_id) DO UPDATE SET
                     gross_pnl    = EXCLUDED.gross_pnl,
@@ -296,6 +303,7 @@ class SessionSummary:
                     max_drawdown = EXCLUDED.max_drawdown,
                     end_equity   = EXCLUDED.end_equity,
                     notes        = EXCLUDED.notes,
+                    crash_exit   = EXCLUDED.crash_exit,
                     updated_at   = NOW()
             """, {
                 "session_id": self.session_id,
@@ -308,8 +316,70 @@ class SessionSummary:
                 "start_equity": self.start_equity,
                 "end_equity": self.end_equity,
                 "notes": self.notes,
+                "crash_exit": self.crash_exit,
             })
         conn.commit()
+
+    @classmethod
+    def write_crash_safe(
+        cls,
+        conn: psycopg2.extensions.connection,
+        session_date: date,
+        trades: Optional[list] = None,
+        source: str = "python",
+        start_equity: Optional[float] = None,
+        notes: Optional[str] = None,
+    ) -> "SessionSummary":
+        """Write a session_summary row even when called from a crash/finally handler.
+
+        Designed to be called unconditionally (trades may be empty, None, or
+        partial).  Idempotent: running twice writes the same row via
+        ON CONFLICT DO UPDATE.  Sets crash_exit=True so the operator can
+        distinguish clean EOD exits from crash-triggered writes.
+
+        Args:
+            conn:         Active psycopg2 connection.
+            session_date: The trading session date.
+            trades:       Completed Trade objects collected before the crash.
+                          Pass None or [] when no trades are available.
+            source:       'python' or 'cpp'.
+            start_equity: Starting account equity for drawdown calculation.
+            notes:        Optional diagnostic message (e.g. exception text).
+
+        Returns:
+            The SessionSummary instance that was written.
+        """
+        completed = [t for t in (trades or []) if t.exit_time is not None]
+
+        gross_pnl = sum(t.pnl or 0.0 for t in completed)
+        wins = sum(1 for t in completed if (t.pnl or 0.0) > 0)
+
+        equity = start_equity or 0.0
+        peak = equity
+        max_dd = 0.0
+        for t in sorted(completed, key=lambda x: (x.entry_time,)):
+            equity += t.pnl or 0.0
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+
+        summary = cls(
+            session_id=f"{session_date}_{source}",
+            date=session_date,
+            source=source,
+            gross_pnl=gross_pnl,
+            trade_count=len(completed),
+            win_count=wins,
+            max_drawdown=max_dd,
+            start_equity=start_equity,
+            end_equity=(start_equity or 0.0) + gross_pnl,
+            notes=notes,
+            crash_exit=True,
+        )
+        summary.save(conn)
+        return summary
 
     # ── read ──────────────────────────────────────────────────────
 
@@ -320,7 +390,8 @@ class SessionSummary:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT session_id, date, source, gross_pnl, trade_count,
-                       win_count, max_drawdown, start_equity, end_equity, notes
+                       win_count, max_drawdown, start_equity, end_equity,
+                       notes, crash_exit
                 FROM session_summary
                 WHERE date = %s
                 ORDER BY source
