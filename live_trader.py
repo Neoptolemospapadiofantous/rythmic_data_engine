@@ -216,12 +216,13 @@ def _write_trade_open(conn, session_date: datetime.date, signal: Signal,
 
 
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,
-                       exit_reason: str, point_value: float) -> None:
+                       exit_reason: str, point_value: float) -> float:
+    """Close a trade in the DB and return realized P&L in USD (0.0 if trade not found)."""
     with conn.cursor() as cur:
         cur.execute("SELECT direction, entry_price FROM trades WHERE id = %s", (trade_id,))
         row = cur.fetchone()
         if row is None:
-            return
+            return 0.0
         direction = row["direction"]
         entry = float(row["entry_price"])
         pts = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
@@ -233,6 +234,7 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
             WHERE id = %s
         """, (exit_price, exit_ts, pts, pnl_usd, exit_reason, trade_id))
     conn.commit()
+    return pnl_usd
 
 
 def _write_session_summary(conn, session_date: datetime.date, dry_run: bool,
@@ -462,12 +464,12 @@ class LiveTrader:
         if self._active_trade_id is not None:
             if not isinstance(exit_ts, datetime.datetime):
                 exit_ts = datetime.datetime.now(tz=datetime.timezone.utc)
-            _write_trade_close(self._conn, self._active_trade_id,
-                               exit_price, exit_ts, exit_reason, self._point_value)
-            self._log.info("trade_close id=%s exit=%s reason=%s",
-                           self._active_trade_id, exit_price, exit_reason)
-            # Update daily P&L tracking
-            from strategy.micro_orb import StrategyState
+            realized_pnl = _write_trade_close(self._conn, self._active_trade_id,
+                                              exit_price, exit_ts, exit_reason, self._point_value)
+            self._daily_pnl += realized_pnl
+            self._log.info("trade_close id=%s exit=%s reason=%s pnl=%.2f daily_pnl=%.2f",
+                           self._active_trade_id, exit_price, exit_reason,
+                           realized_pnl, self._daily_pnl)
             self._active_trade_id = None
         self._write_state()
 

@@ -486,5 +486,94 @@ class TestPidFile(unittest.TestCase):
             self.assertFalse(pid_path.exists(), "PID file must be removed by _emergency_flatten")
 
 
+# ── daily P&L accumulation tests ─────────────────────────────────────────────
+
+@pytest.mark.fast
+class TestDailyPnl(unittest.TestCase):
+
+    def test_daily_pnl_accumulates_after_exit(self):
+        """_daily_pnl must reflect realized P&L after _on_exit() is called."""
+        import live_trader
+        cfg = _make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+            cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+            trader = live_trader.LiveTrader(cfg, dry_run=True)
+            trader._active_trade_id = 99
+            trader._session_date = datetime.date.today()
+
+            # Mock conn: _write_trade_close queries direction+entry_price, then updates
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_cursor.__enter__ = lambda s: mock_cursor
+            mock_cursor.__exit__ = MagicMock(return_value=False)
+            # DB row for the open trade: LONG entry at 17000, point_value=20
+            mock_cursor.fetchone.return_value = {"direction": "LONG", "entry_price": 17000.0}
+            mock_conn.cursor.return_value = mock_cursor
+            trader._conn = mock_conn
+
+            self.assertEqual(trader._daily_pnl, 0.0)
+            exit_price = 17010.0  # +10 pts × 20 = +$200
+            trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "TARGET_HIT")
+
+            self.assertAlmostEqual(trader._daily_pnl, 200.0, places=2,
+                                   msg="_daily_pnl must accumulate realized P&L after exit")
+
+    def test_daily_pnl_negative_on_loss(self):
+        """_daily_pnl must go negative on a losing trade."""
+        import live_trader
+        cfg = _make_config()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+            cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+            trader = live_trader.LiveTrader(cfg, dry_run=True)
+            trader._active_trade_id = 100
+            trader._session_date = datetime.date.today()
+
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_cursor.__enter__ = lambda s: mock_cursor
+            mock_cursor.__exit__ = MagicMock(return_value=False)
+            mock_cursor.fetchone.return_value = {"direction": "LONG", "entry_price": 17000.0}
+            mock_conn.cursor.return_value = mock_cursor
+            trader._conn = mock_conn
+
+            exit_price = 16996.0  # -4 pts × 20 = -$80
+            trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "SL_HIT")
+
+            self.assertAlmostEqual(trader._daily_pnl, -80.0, places=2,
+                                   msg="_daily_pnl must go negative on losing trade")
+
+    def test_write_trade_close_returns_pnl(self):
+        """_write_trade_close must return realized P&L in USD, not None."""
+        import live_trader
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = lambda s: mock_cursor
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.fetchone.return_value = {"direction": "SHORT", "entry_price": 17050.0}
+        mock_conn.cursor.return_value = mock_cursor
+
+        # SHORT: entry 17050, exit 17030 → +20 pts × 20 = $400
+        result = live_trader._write_trade_close(
+            mock_conn, 1, 17030.0, datetime.datetime.now(tz=ET), "TARGET_HIT", 20.0)
+        self.assertIsInstance(result, float, "_write_trade_close must return float")
+        self.assertAlmostEqual(result, 400.0, places=2)
+
+    def test_write_trade_close_returns_zero_for_missing_trade(self):
+        """_write_trade_close must return 0.0 when trade_id not found."""
+        import live_trader
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = lambda s: mock_cursor
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        mock_cursor.fetchone.return_value = None
+        mock_conn.cursor.return_value = mock_cursor
+
+        result = live_trader._write_trade_close(
+            mock_conn, 999, 17000.0, datetime.datetime.now(tz=ET), "EOD", 20.0)
+        self.assertEqual(result, 0.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
