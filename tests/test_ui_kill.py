@@ -108,6 +108,18 @@ class TestKillEndpoint(unittest.TestCase):
             os.unlink(pid_file)
 
 
+    def test_kill_rejected_from_non_localhost(self):
+        """Kill endpoint must return 403 when request originates from a non-localhost IP."""
+        app = _app_with_pid_file("/tmp/dummy.pid")
+        with app.test_client() as c:
+            # environ_base overrides REMOTE_ADDR for the test request
+            res = c.post("/api/live/kill", environ_base={"REMOTE_ADDR": "10.0.0.1"})
+        self.assertEqual(res.status_code, 403)
+        data = res.get_json()
+        self.assertFalse(data["ok"])
+        self.assertIn("localhost", data["error"])
+
+
 class TestStatusEndpoint(unittest.TestCase):
 
     def test_status_returns_not_running_when_no_pid_file(self):

@@ -13,11 +13,12 @@ import os
 import signal
 from pathlib import Path
 
-from flask import Blueprint, jsonify, render_template, current_app
+from flask import Blueprint, jsonify, render_template, current_app, request
 
 live_bp = Blueprint("live", __name__)
 
 _DEFAULT_PID_FILE = Path("data/live_trader.pid")
+_LOCALHOST_ADDRS = frozenset({"127.0.0.1", "::1", "localhost"})
 
 
 def _pid_file_path() -> Path:
@@ -51,14 +52,27 @@ def dashboard():
     return render_template("live.html")
 
 
+def _require_localhost():
+    """Return a 403 JSON response if the request is not from localhost, else None."""
+    remote = request.remote_addr or ""
+    if remote not in _LOCALHOST_ADDRS:
+        return jsonify({"ok": False, "error": "Kill switch only accessible from localhost"}), 403
+    return None
+
+
 @live_bp.post("/api/live/kill")
 def kill_trader():
     """Send SIGTERM to the live trader process.
 
+    Only callable from localhost to prevent remote kill-switch abuse.
     Reads data/live_trader.pid (or config override LIVE_TRADER_PID_FILE).
     Returns JSON: {"ok": true, "pid": <int>} on success,
                   {"ok": false, "error": "<reason>"} on failure.
     """
+    guard = _require_localhost()
+    if guard is not None:
+        return guard
+
     pid = _read_pid()
     if pid is None:
         return jsonify({"ok": False, "error": "PID file not found or unreadable"}), 404
