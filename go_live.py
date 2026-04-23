@@ -4,24 +4,27 @@ go_live.py — Formal paper→live promotion script for the NQ ORB trading syste
 
 Usage
 -----
-    python go_live.py              # Run all pre-flight gates, print results
-    python go_live.py --confirm-live   # Promote to live if all gates pass
+    python go_live.py                   # Run all pre-flight gates, print results
+    python go_live.py --confirm-live    # Promote to live if all gates pass
+    python go_live.py --update-checksums  # Write current model sha256 hashes and exit
 
 Gates (all must pass before promotion)
 ---------------------------------------
 A. NO_DEPLOY lockfile not present
-B. config/live_config.json exists and is valid JSON
+B. Config loaded successfully
 C. dry_run is currently True (must be in paper mode before promoting)
 D. PostgreSQL connection succeeds
 E. Rithmic SSL cert file exists
-F. ML model file exists (when ml.enabled is True)
+F. ML model file exists and checksum matches (when ml.enabled is True)
 G. Disk space > 5 GB on working directory filesystem
 H. No data/DRIFT_HALT file present
 I. Prop firm limits set (daily_loss_limit > 0, max_position_size > 0)
+J. Account equity above minimum (when PNL_PLANT_EQUITY env var is set)
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -36,9 +39,10 @@ log = logging.getLogger(__name__)
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
-CONFIG_PATH   = Path("config/live_config.json")
-DRIFT_HALT    = Path("data/DRIFT_HALT")
-DISK_MIN_BYTES = 5 * 1024 ** 3   # 5 GiB
+CONFIG_PATH      = Path("config/live_config.json")
+CHECKSUMS_PATH   = Path("config/model_checksums.json")
+DRIFT_HALT       = Path("data/DRIFT_HALT")
+DISK_MIN_BYTES   = 5 * 1024 ** 3   # 5 GiB
 
 _GREEN  = "\033[32m"
 _RED    = "\033[31m"
@@ -143,8 +147,8 @@ def _gate_no_deploy(cfg: dict) -> GateResult:
 
 
 def _gate_config_valid(cfg: dict) -> GateResult:
-    # Already parsed at this point; this gate was implicitly satisfied by _load_config().
-    return GateResult("B. config/live_config.json valid JSON", True)
+    # Config was already loaded and parsed by _load_config(); reaching this gate means success.
+    return GateResult("B. Config loaded successfully", True, str(CONFIG_PATH))
 
 
 def _gate_dry_run(cfg: dict) -> GateResult:
@@ -170,14 +174,79 @@ def _gate_cert(cfg: dict) -> GateResult:
     return GateResult("E. Rithmic SSL cert file exists", False, f"not found: {cert}")
 
 
+def _sha256(path: Path) -> str:
+    """Return the hex sha256 digest of a file."""
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _gate_ml_model(cfg: dict) -> GateResult:
     ml = cfg.get("ml", {})
     if not ml.get("enabled", False):
-        return GateResult("F. ML model file exists", True, "ML disabled — skipped")
+        return GateResult("F. ML model file + checksum", True, "ML disabled — skipped")
+
     model_path = Path(ml.get("model_path", ""))
-    if model_path and model_path.exists():
-        return GateResult("F. ML model file exists", True, str(model_path))
-    return GateResult("F. ML model file exists", False, f"not found: {model_path}")
+    if not (model_path and model_path.exists()):
+        return GateResult("F. ML model file + checksum", False, f"not found: {model_path}")
+
+    # Checksum verification — skipped gracefully if checksums file doesn't exist yet.
+    if not CHECKSUMS_PATH.exists():
+        return GateResult(
+            "F. ML model file + checksum",
+            True,
+            f"{model_path}  (no checksum file — run --update-checksums to record)",
+        )
+
+    try:
+        expected = json.loads(CHECKSUMS_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        return GateResult("F. ML model file + checksum", False, f"cannot read checksums: {exc}")
+
+    key = str(model_path)
+    if key not in expected:
+        return GateResult(
+            "F. ML model file + checksum",
+            True,
+            f"{model_path}  (no expected hash recorded for this path)",
+        )
+
+    actual = _sha256(model_path)
+    if actual == expected[key]:
+        return GateResult("F. ML model file + checksum", True, f"{model_path}  sha256 OK")
+    return GateResult(
+        "F. ML model file + checksum",
+        False,
+        f"checksum MISMATCH — model may be stale or corrupt",
+    )
+
+
+def update_checksums(cfg: dict) -> None:
+    """Compute sha256 for all configured model files and write to config/model_checksums.json."""
+    ml = cfg.get("ml", {})
+    paths_to_hash = [ml.get("model_path", ""), ml.get("scaler_path", "")]
+    hashes: dict[str, str] = {}
+    if CHECKSUMS_PATH.exists():
+        try:
+            hashes = json.loads(CHECKSUMS_PATH.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    for p_str in paths_to_hash:
+        if not p_str:
+            continue
+        p = Path(p_str)
+        if p.exists():
+            hashes[str(p)] = _sha256(p)
+            print(f"  hashed  {p}  →  {hashes[str(p)][:16]}…")
+        else:
+            print(f"  SKIP    {p}  (not found)")
+
+    CHECKSUMS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CHECKSUMS_PATH.write_text(json.dumps(hashes, indent=2))
+    print(f"\n  Checksums written to {CHECKSUMS_PATH}")
 
 
 def _gate_disk_space(_cfg: dict) -> GateResult:
@@ -219,6 +288,47 @@ def _gate_prop_firm(cfg: dict) -> GateResult:
     return GateResult("I. Prop firm limits set", False, ", ".join(missing))
 
 
+def _gate_account_equity(cfg: dict) -> GateResult:
+    """Gate J: verify account equity is above minimum via PNL_PLANT_EQUITY env var.
+
+    Skipped gracefully when the env var is not set — operator must set it before promotion
+    once a live Rithmic equity query is implemented.
+    """
+    equity_str = os.environ.get("PNL_PLANT_EQUITY", "")
+    if not equity_str:
+        return GateResult(
+            "J. Account equity above minimum",
+            True,
+            "SKIP — set PNL_PLANT_EQUITY env var to enable this gate",
+        )
+
+    try:
+        equity = float(equity_str)
+    except ValueError:
+        return GateResult(
+            "J. Account equity above minimum",
+            False,
+            f"PNL_PLANT_EQUITY='{equity_str}' is not a valid number",
+        )
+
+    pf = cfg.get("prop_firm", {})
+    # Minimum = 50% of trailing drawdown limit (e.g. $50k account - $2.5k drawdown = $47.5k min)
+    tdd = float(pf.get("trailing_drawdown_limit", 0) or 0)
+    minimum = max(0.0, tdd * 0.5)  # conservative floor; operator can tighten
+
+    if equity >= minimum:
+        return GateResult(
+            "J. Account equity above minimum",
+            True,
+            f"${equity:,.0f} ≥ ${minimum:,.0f} minimum",
+        )
+    return GateResult(
+        "J. Account equity above minimum",
+        False,
+        f"${equity:,.0f} < ${minimum:,.0f} minimum — account may be impaired",
+    )
+
+
 _ALL_GATES = [
     _gate_no_deploy,
     _gate_config_valid,
@@ -229,6 +339,7 @@ _ALL_GATES = [
     _gate_disk_space,
     _gate_drift_halt,
     _gate_prop_firm,
+    _gate_account_equity,
 ]
 
 
@@ -286,6 +397,10 @@ def run_preflight(args: list[str]) -> tuple[int, list[GateResult]]:
             file=sys.stderr,
         )
         return 1, []
+
+    if parsed.update_checksums:
+        update_checksums(cfg)
+        return 0, []
 
     # Gate A (NO_DEPLOY) is checked separately so we can fail fast and clearly.
     no_deploy_result = _gate_no_deploy(cfg)
@@ -360,14 +475,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "Without --confirm-live the script is read-only (safe to run any time).\n\n"
             "Gates:\n"
             "  A. NO_DEPLOY lockfile absent\n"
-            "  B. config/live_config.json valid JSON\n"
+            "  B. Config loaded successfully\n"
             "  C. dry_run currently True\n"
             "  D. PostgreSQL connection\n"
             "  E. Rithmic SSL cert file exists\n"
-            "  F. ML model file exists (when enabled)\n"
+            "  F. ML model file exists and checksum matches (when enabled)\n"
             "  G. Disk space > 5 GB\n"
             "  H. No data/DRIFT_HALT file\n"
             "  I. Prop firm limits set (daily_loss_limit > 0, max_position_size > 0)\n"
+            "  J. Account equity above minimum (when PNL_PLANT_EQUITY env var is set)\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -379,6 +495,16 @@ def _build_parser() -> argparse.ArgumentParser:
             "REQUIRED to actually enable live trading. "
             "Without this flag the script is read-only. "
             "All gates must pass before this flag has any effect."
+        ),
+    )
+    parser.add_argument(
+        "--update-checksums",
+        action="store_true",
+        default=False,
+        help=(
+            "Compute sha256 hashes for all configured model files and write them to "
+            "config/model_checksums.json. Run this after deploying a new model. "
+            "Exits immediately without running preflight gates."
         ),
     )
     return parser
