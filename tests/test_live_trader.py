@@ -21,10 +21,14 @@ import zoneinfo
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
 
+import pytest
+
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from strategy.micro_orb import MicroORBStrategy, Signal, StrategyState
+
+pytestmark = pytest.mark.live_trader
 
 ET = zoneinfo.ZoneInfo("America/New_York")
 
