@@ -223,11 +223,15 @@ def _submit_order(signal: Signal, config: dict, dry_run: bool, log: logging.Logg
                  signal.direction, signal.entry_price, signal.stop_loss, signal.target)
         return f"DRY-{datetime.datetime.now(datetime.timezone.utc).strftime('%H%M%S%f')}"
 
-    # TODO: implement live Rithmic order submission via protobuf
-    # See src/client.cpp for WebSocket/protobuf patterns; replicate in Python with
-    # the rithmic protobuf library or direct WebSocket using config["rithmic"] env vars.
-    log.error("live order submission not yet implemented — should not reach here with dry_run=False")
-    return None
+    # Live order submission is intentionally not implemented here.
+    # Gate: live trading requires go_live.py to have set dry_run=False after passing
+    # all pre-flight checks. The actual submission path goes through the C++ executor
+    # (src/client.cpp) or a future async_rithmic Python client.
+    raise NotImplementedError(
+        "Live order submission not yet implemented. "
+        "Run with dry_run=True for paper trading. "
+        "See src/client.cpp for the C++ protobuf order submission pattern."
+    )
 
 
 # ── trade DB writes ───────────────────────────────────────────────────────────
@@ -368,6 +372,11 @@ class LiveTrader:
         self._session_date: Optional[datetime.date] = None
         self._active_trade_id: Optional[int] = None
         self._last_bar_ts: Optional[datetime.datetime] = None
+        self._pid_path: Path = Path(config.get("pid_path", "data/live_trader.pid"))
+        self._state_path: Path = Path(config.get("state_path", "data/live_state.json"))
+        self._daily_pnl: float = 0.0
+        self._reconnect_failures: int = 0
+        self._last_tick_ts_str: Optional[str] = None
         self._last_tick_ts: Optional[datetime.datetime] = None
         self._last_watchdog = time.monotonic()
         self._eod_flatten_done = False
@@ -385,6 +394,11 @@ class LiveTrader:
 
     def _emergency_flatten(self, reason: str) -> None:
         """Flatten open position and write session record regardless of clean state."""
+        # Clean up PID file so the service monitor knows this process is gone
+        try:
+            self._pid_path.unlink(missing_ok=True)
+        except Exception:
+            pass
         try:
             if (self._strategy.state.name == "IN_POSITION"
                     and self._active_trade_id is not None and self._conn is not None):
@@ -411,12 +425,17 @@ class LiveTrader:
         self._log.info("live_trader starting: symbol=%s dry_run=%s session=%s",
                        self._symbol, self._dry_run, self._session_date)
 
+        # Write PID file so the UI kill-switch and service monitor can find this process
+        self._pid_path.parent.mkdir(parents=True, exist_ok=True)
+        self._pid_path.write_text(str(os.getpid()))
+
         self._conn = _pg_connect_with_retry(self._config, self._log)
         _ensure_trades_schema(self._conn)
 
         # Real position reconciliation — queries DB, does NOT just write a warning file
         _reconcile_position(self._conn, self._config, self._strategy, self._log)
 
+        self._write_state("CONNECTED")
         _sd_notify("READY=1")
         self._log.info("startup complete — entering trading loop")
         self._loop()
@@ -469,6 +488,7 @@ class LiveTrader:
 
             if tick is not None and (self._last_tick_ts is None or tick["ts"] > self._last_tick_ts):
                 self._last_tick_ts = tick["ts"]
+                self._last_tick_ts_str = tick["ts"].isoformat() if hasattr(tick["ts"], "isoformat") else str(tick["ts"])
                 result = self._strategy.on_tick({"price": float(tick["price"]), "ts": tick["ts"]})
                 if result == "EXIT":
                     self._on_exit(float(tick["price"]), tick["ts"], "SL_OR_TARGET")
@@ -487,6 +507,7 @@ class LiveTrader:
         self._log.info("trade_open id=%s direction=%s entry=%s sl=%s target=%s dry_run=%s",
                        self._active_trade_id, signal.direction, signal.entry_price,
                        signal.stop_loss, signal.target, self._dry_run)
+        self._write_state()
 
     def _on_exit(self, exit_price: float, exit_ts, exit_reason: str) -> None:
         if self._active_trade_id is not None:
@@ -496,7 +517,10 @@ class LiveTrader:
                                exit_price, exit_ts, exit_reason, self._point_value)
             self._log.info("trade_close id=%s exit=%s reason=%s",
                            self._active_trade_id, exit_price, exit_reason)
+            # Update daily P&L tracking
+            from strategy.micro_orb import StrategyState
             self._active_trade_id = None
+        self._write_state()
 
     def _maybe_eod(self, now_et: datetime.datetime) -> None:
         if self._eod_flatten_done:
@@ -520,6 +544,51 @@ class LiveTrader:
         if now - self._last_watchdog >= WATCHDOG_INTERVAL:
             _sd_notify("WATCHDOG=1")
             self._last_watchdog = now
+
+    def _write_state(self, connection: str = "CONNECTED") -> None:
+        """Write current position + connection state to data/live_state.json atomically.
+
+        The UI reads this file for the live position display. Atomic write via
+        .tmp + rename prevents partial reads.
+        """
+        from strategy.micro_orb import StrategyState
+        try:
+            pos = self._strategy.current_position()
+            if pos is not None:
+                position_str = pos.direction
+                entry_price = pos.entry_price
+                sl = pos.stop_loss
+                unrealized = 0.0
+                latest = _poll_latest_tick(self._conn, self._symbol, None) if self._conn else None
+                if latest and pos:
+                    price = float(latest["price"])
+                    if pos.direction == "LONG":
+                        unrealized = (price - pos.entry_price) * self._point_value
+                    else:
+                        unrealized = (pos.entry_price - price) * self._point_value
+            else:
+                position_str = "FLAT"
+                entry_price = None
+                sl = None
+                unrealized = 0.0
+
+            state = {
+                "position": position_str,
+                "entry_price": entry_price,
+                "sl": sl,
+                "unrealized_pnl": round(unrealized, 2),
+                "daily_pnl": round(self._daily_pnl, 2),
+                "connection": connection,
+                "reconnect_failures": self._reconnect_failures,
+                "last_tick_ts": self._last_tick_ts_str,
+                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            }
+            self._state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._state_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(state))
+            tmp.rename(self._state_path)
+        except Exception as exc:
+            self._log.debug("_write_state error (non-fatal): %s", exc)
 
 
 # ── feature computation (delegates to strategy.features for parity with backtest) ─
