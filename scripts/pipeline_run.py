@@ -16,10 +16,13 @@ Output: timing report with % share per stage and a ranked optimization plan.
 from __future__ import annotations
 
 import argparse
+import cProfile
 import csv
 import functools
+import io
 import json
 import os
+import pstats
 import sys
 import time
 from dataclasses import asdict, dataclass, field
@@ -99,6 +102,9 @@ def _fmt_time(seconds: float) -> str:
 
 _CACHE_DIR = Path("data") / "pipeline_cache"
 
+# Global flag set by CLI --profile; run_stage reads it.
+_PROFILING_ENABLED: bool = False
+
 
 def run_stage(
     name: str,
@@ -108,7 +114,7 @@ def run_stage(
     cache_key: str | None = None,
     report: PipelineReport,
 ) -> Any:
-    """Run one pipeline stage, recording elapsed time and cache hit."""
+    """Run one pipeline stage, recording elapsed time, cache hit, and optional cProfile."""
     key = cache_key or name.lower().replace(" ", "_")
     cache_path = _CACHE_DIR / f"{key}.parquet"
 
@@ -120,13 +126,40 @@ def run_stage(
     t0 = time.perf_counter()
     error: str | None = None
     result: Any = None
-    try:
-        result = fn()
-    except Exception as exc:
-        error = str(exc)
-    elapsed = time.perf_counter() - t0
+
+    if _PROFILING_ENABLED:
+        profiler = cProfile.Profile()
+        try:
+            result = profiler.runcall(fn)
+        except Exception as exc:
+            error = str(exc)
+        elapsed = time.perf_counter() - t0
+        _print_stage_profile(name, profiler, elapsed)
+    else:
+        try:
+            result = fn()
+        except Exception as exc:
+            error = str(exc)
+        elapsed = time.perf_counter() - t0
+
     report.stages.append(StageResult(name=name, elapsed_s=elapsed, error=error))
     return result
+
+
+def _print_stage_profile(name: str, profiler: cProfile.Profile, elapsed_s: float) -> None:
+    """Print top-10 cProfile hotspots for a single pipeline stage."""
+    buf = io.StringIO()
+    stats = pstats.Stats(profiler, stream=buf)
+    stats.sort_stats("cumulative")
+    stats.print_stats(10)
+    lines = buf.getvalue().splitlines()
+
+    print(f"\n  ── cProfile: [{name}]  ({_fmt_time(elapsed_s)}) ──────────────────")
+    # Skip pstats header boilerplate (first 5 lines), print the rest
+    for line in lines[5:]:
+        if line.strip():
+            print(f"    {line}")
+    print()
 
 
 # ---------------------------------------------------------------------------
@@ -646,6 +679,15 @@ def main() -> None:
         dest="start_date",
         help="Session date to load from DB in --compare-ml mode (default: today)",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help=(
+            "Enable cProfile on each pipeline stage. "
+            "Prints top-10 hotspots per stage to identify WHERE the time goes. "
+            "Useful for pinpointing which functions to vectorize or parallelize."
+        ),
+    )
     args = parser.parse_args()
 
     if args.compare_ml:
@@ -656,6 +698,12 @@ def main() -> None:
             start_date=args.start_date,
         )
         return
+
+    # Enable per-stage cProfile when requested
+    global _PROFILING_ENABLED
+    _PROFILING_ENABLED = args.profile
+    if args.profile:
+        print("cProfile enabled — top-10 hotspots will be printed per stage.")
 
     report = PipelineReport()
 
