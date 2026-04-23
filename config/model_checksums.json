@@ -1,0 +1,7 @@
+{
+  "_comment": "SHA-256 checksums for ML model files validated by go_live.py Gate F. Update with: python go_live.py --update-checksums",
+  "_format": "{ \"relative/path/to/model.pkl\": \"sha256hexdigest\" }",
+  "_stub_warning": "Current checksums are for STUB placeholder files. Run the ML pipeline and update with: python go_live.py --update-checksums",
+  "models/orb_xgb_latest.pkl": "0c9d988e89b728eb95e94a4f9d78f713cd4f53680bda3013539d1471c2321100",
+  "models/orb_scaler_latest.pkl": "0c9d988e89b728eb95e94a4f9d78f713cd4f53680bda3013539d1471c2321100"
+}
