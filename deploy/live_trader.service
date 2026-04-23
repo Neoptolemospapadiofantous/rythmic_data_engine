@@ -1,0 +1,75 @@
+# systemd unit for live_trader.py (NQ ORB live trading daemon)
+#
+# Install:  sudo cp deploy/live_trader.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable live_trader
+#           sudo systemctl start live_trader
+#
+# The service uses Type=notify; live_trader.py must call sd_notify("READY=1")
+# after connecting to Rithmic and the DB.  WatchdogSec fires if the process
+# stops calling sd_notify("WATCHDOG=1") within the window — live_trader.py
+# should ping the watchdog on every processed tick or at worst every 60 s.
+
+[Unit]
+Description=NQ ORB Live Trader
+Documentation=https://github.com/neoptolemospapadiofantous/rithmic_engine
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+Requires=postgresql-16.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/rithmic_engine
+
+# Load credentials from .env (KEY=value format, one per line)
+EnvironmentFile=/home/opc/rithmic_engine/.env
+
+# Hard-block start if the NO_DEPLOY lockfile is present.
+# go_live.py removes this file as part of the promotion process.
+ExecStartPre=/bin/bash -c \
+    '[ ! -f /home/opc/rithmic_engine/NO_DEPLOY ] || \
+     { echo "NO_DEPLOY lockfile present — refusing to start live trader"; exit 1; }'
+
+ExecStart=/home/opc/rithmic_engine/.venv/bin/python \
+    /home/opc/rithmic_engine/live_trader.py \
+    --config /home/opc/rithmic_engine/config/live_config.json
+
+# Give the process 60 s to connect and call sd_notify("READY=1")
+TimeoutStartSec=60s
+
+# Watchdog: live_trader.py must call sd_notify("WATCHDOG=1") at least every
+# 60 s (half of WatchdogSec).  Missing heartbeats trigger a restart.
+WatchdogSec=120s
+
+# Restart automatically on any non-clean exit (crashes, OOM, watchdog timeout)
+Restart=on-failure
+RestartSec=15s
+# Max 5 restarts in 10 minutes before systemd gives up and pages the operator
+StartLimitIntervalSec=600s
+StartLimitBurst=5
+
+# Give the process up to 30 s to flush positions and write session record on stop
+TimeoutStopSec=30s
+
+# Send SIGTERM first (triggers emergency flatten handler in live_trader.py),
+# then SIGKILL after TimeoutStopSec if the process has not exited
+KillMode=process
+KillSignal=SIGTERM
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+TimeoutKillSec=60s
+
+# Route stdout/stderr to journald; use: journalctl -u live_trader -f
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=live_trader
+
+# Prevent the trader from forking or exec'ing unexpected children
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
