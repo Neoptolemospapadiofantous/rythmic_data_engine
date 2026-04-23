@@ -205,8 +205,9 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
     )
 
     # Force strategy into IN_POSITION state with the recovered position
+    from strategy.micro_orb import StrategyState
     strategy._position = strategy._make_position_from_db(row)  # type: ignore[attr-defined]
-    strategy.state = strategy.state.__class__["IN_POSITION"]    # StrategyState.IN_POSITION
+    strategy.state = StrategyState.IN_POSITION
     return dict(row)
 
 
@@ -519,6 +520,28 @@ class LiveTrader:
         if now - self._last_watchdog >= WATCHDOG_INTERVAL:
             _sd_notify("WATCHDOG=1")
             self._last_watchdog = now
+
+
+# ── feature computation (delegates to strategy.features for parity with backtest) ─
+
+def compute_live_features(bars: list) -> dict:
+    """Compute the 74-feature dict for the given bar history.
+
+    Delegates to strategy.features.compute_features() so that live and backtest
+    always use the identical implementation — no drift possible.
+
+    Args:
+        bars: list of bar dicts with keys: timestamp, open, high, low, close,
+              volume, bid_volume (optional), ask_volume (optional).
+
+    Returns:
+        dict mapping each of the 74 feature names to its computed value.
+
+    Raises:
+        ImportError: if strategy.features is not yet installed (install T1 first).
+    """
+    from strategy.features import compute_features  # noqa: PLC0415 — lazy import
+    return compute_features(bars)
 
 
 # ── position restoration helper (monkey-patched onto strategy) ────────────────
