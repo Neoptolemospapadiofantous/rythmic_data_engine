@@ -516,7 +516,68 @@ def check_python_data(conn) -> bool:
     return ok
 
 
-# ── section 7: config validation ───────────────────────────────────
+# ── section 7: ml on/off comparison summary ───────────────────────
+def check_ml_comparison() -> bool:
+    """
+    Show ML on vs off paper-session comparison from the comparison store.
+
+    Non-fatal (returns True) when data is missing — this section is
+    informational until at least 5 sessions per arm are collected.
+    """
+    section("7. ML On/Off Comparison (paper trading)")
+
+    store_path = ENGINE_DIR / "data" / "ml_comparison" / "sessions.json"
+    if not store_path.exists():
+        result("  sessions.json present", WARN,
+               "No comparison data yet — run: python scripts/pipeline_run.py --compare-ml")
+        return True
+
+    try:
+        import json as _json
+        records = _json.loads(store_path.read_text())
+    except Exception as exc:
+        result("  sessions.json readable", FAIL, str(exc))
+        return False
+
+    ml_on  = [r for r in records if r.get("ml_enabled")]
+    ml_off = [r for r in records if not r.get("ml_enabled")]
+
+    result("  sessions (ML ON)",  INFO, str(len(ml_on)))
+    result("  sessions (ML OFF)", INFO, str(len(ml_off)))
+
+    MIN_SESSIONS = 5
+    if len(ml_on) < MIN_SESSIONS or len(ml_off) < MIN_SESSIONS:
+        result(
+            "  sufficient sessions (≥5 per arm)",
+            WARN,
+            f"ML-on={len(ml_on)}, ML-off={len(ml_off)} — need {MIN_SESSIONS} each",
+        )
+        return True  # not a hard failure — data is still accumulating
+
+    result("  sufficient sessions (≥5 per arm)", PASS)
+
+    def _avg(rows: list[dict], key: str) -> float:
+        vals = [r[key] for r in rows if key in r]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    avg_pnl_on  = _avg(ml_on,  "total_pnl")
+    avg_pnl_off = _avg(ml_off, "total_pnl")
+    delta       = avg_pnl_on - avg_pnl_off
+
+    result("  avg P&L/session (ML ON)",  INFO, f"${avg_pnl_on:.2f}")
+    result("  avg P&L/session (ML OFF)", INFO, f"${avg_pnl_off:.2f}")
+
+    if delta > 0:
+        result("  ML advantage",  PASS, f"+${delta:.2f}/session vs ML-off")
+    elif delta < 0:
+        result("  ML advantage",  WARN, f"ML-off outperforms by ${-delta:.2f}/session")
+    else:
+        result("  ML advantage",  INFO, "no difference detected")
+
+    return True
+
+
+# ── section 8: config validation ───────────────────────────────────
 def check_config() -> bool:
     section("7. Config Validation (.env)")
     ok = True
@@ -621,10 +682,11 @@ def main():
             finally:
                 conn.close()
 
+    results["ml_cmp"] = check_ml_comparison()
     results["config"] = check_config()
 
     # ── summary ───────────────────────────────────────────────────
-    section("8. Summary")
+    section("9. Summary")
     labels = {
         "build":  "Build integrity",
         "source": "Source invariants",
@@ -632,6 +694,7 @@ def main():
         "schema": "PostgreSQL schema",
         "data":   "Data health",
         "pydata": "Python data readability",
+        "ml_cmp": "ML on/off comparison",
         "config": "Config validation",
     }
 
