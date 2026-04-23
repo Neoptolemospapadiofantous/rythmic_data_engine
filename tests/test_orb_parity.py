@@ -28,6 +28,8 @@ from datetime import datetime, timedelta, date, time
 from pathlib import Path
 from typing import Optional
 
+import pytest
+
 # ── repository root on sys.path ───────────────────────────────────────────────
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -132,6 +134,7 @@ def _run_cpp(bars: list[dict]) -> Optional[dict]:
 
 # ── Python-only tests (always run) ───────────────────────────────────────────
 
+@pytest.mark.orb_parity
 class TestPythonORBSignal(unittest.TestCase):
     """Python MicroORBStrategy: correct signal and SL on the 6-bar scenario."""
 
@@ -198,6 +201,8 @@ class TestPythonORBSignal(unittest.TestCase):
 
 # ── C++ / Python parity tests (skipped if binary absent) ─────────────────────
 
+@pytest.mark.orb_parity
+@pytest.mark.cpp
 class TestCppPythonParity(unittest.TestCase):
     """C++ and Python ORB implementations must agree on signal and SL."""
 
