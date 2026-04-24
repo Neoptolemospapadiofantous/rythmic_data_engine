@@ -47,6 +47,20 @@ struct SkipTest : std::exception {
     if ((a) != (b)) throw std::runtime_error( \
         std::string("Expected ") + std::to_string(b) + " got " + std::to_string(a))
 
+// ── RAII PostgreSQL connection guard ───────────────────────────────
+//
+// Ensures PQfinish() is always called, even when an ASSERT throws.
+// Without this, raw PGconn* leaked on every assertion failure.
+struct PGConnGuard {
+    PGconn* conn;
+    explicit PGConnGuard(const std::string& cs) : conn(PQconnectdb(cs.c_str())) {}
+    ~PGConnGuard() { if (conn) PQfinish(conn); }
+    PGconn* get()  const { return conn; }
+    bool    ok()   const { return conn && PQstatus(conn) == CONNECTION_OK; }
+    PGConnGuard(const PGConnGuard&)            = delete;
+    PGConnGuard& operator=(const PGConnGuard&) = delete;
+};
+
 // ── fixture ────────────────────────────────────────────────────────
 
 // g_connstr is initialised at static-init time by reading .env, so all TEST
@@ -210,9 +224,8 @@ static void teardown_bbo_table(PGconn* conn) {
 
 static void test_write_bbo_basic() {
     {
-        PGconn* c = PQconnectdb(g_connstr.c_str());
-        truncate_bbo_table(c);
-        PQfinish(c);
+        PGConnGuard g(g_connstr);
+        truncate_bbo_table(g.get());
     }
 
     TickDB db(g_connstr);
@@ -270,22 +283,20 @@ static void teardown_depth_table(PGconn* conn) {
 
 // Helper: true if idx_depth_unique exists (TimescaleDB may not support partial unique indexes)
 static bool depth_unique_index_exists() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    if (PQstatus(c) != CONNECTION_OK) { PQfinish(c); return false; }
-    PGresult* r = PQexec(c,
+    PGConnGuard g(g_connstr);
+    if (!g.ok()) return false;
+    PGresult* r = PQexec(g.get(),
         "SELECT COUNT(*) FROM pg_indexes"
         " WHERE tablename='depth_by_order' AND indexname='idx_depth_unique'");
     bool ok = r && PQresultStatus(r) == PGRES_TUPLES_OK && std::atoi(PQgetvalue(r, 0, 0)) > 0;
     if (r) PQclear(r);
-    PQfinish(c);
     return ok;
 }
 
 static void test_write_depth_basic() {
     {
-        PGconn* c = PQconnectdb(g_connstr.c_str());
-        truncate_depth_table(c);
-        PQfinish(c);
+        PGConnGuard g(g_connstr);
+        truncate_depth_table(g.get());
     }
 
     TickDB db(g_connstr);
@@ -351,23 +362,22 @@ static void test_write_depth_update_types() {
 // ── Schema verification tests (information_schema queries) ──────────
 
 static void test_bbo_table_exists() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
-    PGresult* res = PQexec(c,
+    PGresult* res = PQexec(g.get(),
         "SELECT COUNT(*) FROM information_schema.columns"
         " WHERE table_name = 'bbo'");
     ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
     int count = std::atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
-    PQfinish(c);
 
     ASSERT(count > 0);
 }
 
 static void test_bbo_has_required_columns() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
     const char* required[] = {
         "bid_price", "ask_price", "bid_size", "ask_size", "ts_event"
@@ -377,60 +387,53 @@ static void test_bbo_has_required_columns() {
         std::string sql =
             std::string("SELECT COUNT(*) FROM information_schema.columns"
                         " WHERE table_name = 'bbo' AND column_name = '") + col + "'";
-        PGresult* res = PQexec(c, sql.c_str());
+        PGresult* res = PQexec(g.get(), sql.c_str());
         ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
         int cnt = std::atoi(PQgetvalue(res, 0, 0));
         PQclear(res);
-        if (cnt == 0) {
-            PQfinish(c);
+        if (cnt == 0)
             throw std::runtime_error(std::string("bbo missing column: ") + col);
-        }
     }
-
-    PQfinish(c);
 }
 
 static void test_depth_table_exists() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
-    PGresult* res = PQexec(c,
+    PGresult* res = PQexec(g.get(),
         "SELECT COUNT(*) FROM information_schema.columns"
         " WHERE table_name = 'depth_by_order'");
     ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
     int count = std::atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
-    PQfinish(c);
 
     ASSERT(count > 0);
 }
 
 static void test_depth_has_source_ns() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
-    PGresult* res = PQexec(c,
+    PGresult* res = PQexec(g.get(),
         "SELECT COUNT(*) FROM information_schema.columns"
         " WHERE table_name = 'depth_by_order' AND column_name = 'source_ns'");
     ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
     int count = std::atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
-    PQfinish(c);
 
     ASSERT(count > 0);
 }
 
 static void test_depth_has_update_type() {
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
-    PGresult* res = PQexec(c,
+    PGresult* res = PQexec(g.get(),
         "SELECT COUNT(*) FROM information_schema.columns"
         " WHERE table_name = 'depth_by_order' AND column_name = 'update_type'");
     ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
     int count = std::atoi(PQgetvalue(res, 0, 0));
     PQclear(res);
-    PQfinish(c);
 
     ASSERT(count > 0);
 }
@@ -439,10 +442,10 @@ static void test_ticks_unique_index_wide() {
     // Regression guard: idx_ticks_unique must include 'price' AND 'size' columns.
     // The old narrow index (ts_event only) allowed duplicate trades sharing
     // a microsecond timestamp to be silently dropped.
-    PGconn* c = PQconnectdb(g_connstr.c_str());
-    ASSERT(PQstatus(c) == CONNECTION_OK);
+    PGConnGuard g(g_connstr);
+    ASSERT(g.ok());
 
-    PGresult* res = PQexec(c,
+    PGresult* res = PQexec(g.get(),
         "SELECT indexdef FROM pg_indexes"
         " WHERE tablename = 'ticks' AND indexname = 'idx_ticks_unique'");
     ASSERT(res && PQresultStatus(res) == PGRES_TUPLES_OK);
@@ -452,7 +455,6 @@ static void test_ticks_unique_index_wide() {
     if (found)
         indexdef = PQgetvalue(res, 0, 0);
     PQclear(res);
-    PQfinish(c);
 
     ASSERT(found);
     ASSERT(indexdef.find("price") != std::string::npos);

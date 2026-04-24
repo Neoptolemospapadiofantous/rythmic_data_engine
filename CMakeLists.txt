@@ -81,6 +81,32 @@ target_include_directories(dashboard PRIVATE src/ ${CURSES_INCLUDE_DIRS})
 add_executable(orb_strategy src/orb_strategy_main.cpp)
 target_compile_features(orb_strategy PRIVATE cxx_std_17)
 
+# ── NQ ORB Executor ────────────────────────────────────────────────
+set(NQ_EXECUTOR_SOURCES
+    src/execution/executor_main.cpp
+    src/execution/orb_strategy.cpp
+    src/execution/order_manager.cpp
+    src/execution/risk_manager.cpp
+    src/execution/latency_logger.cpp
+)
+
+add_executable(nq_executor ${NQ_EXECUTOR_SOURCES})
+
+target_include_directories(nq_executor PRIVATE
+    src/execution/
+    src/
+    ${CMAKE_CURRENT_BINARY_DIR}
+    ${Boost_INCLUDE_DIRS}
+    ${Protobuf_INCLUDE_DIRS}
+    ${PostgreSQL_INCLUDE_DIRS}
+)
+
+target_link_libraries(nq_executor PRIVATE rithmic_lib)
+
+target_compile_definitions(nq_executor PRIVATE
+    BOOST_ASIO_HAS_CO_AWAIT
+)
+
 # ── Install ────────────────────────────────────────────────────────
 install(TARGETS rithmic_engine DESTINATION bin)
 install(DIRECTORY certs/ DESTINATION share/rithmic_engine/certs)

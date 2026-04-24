@@ -1,30 +1,34 @@
-.PHONY: test test-parallel test-fast test-parity install-dev
+.PHONY: test test-unit test-fast test-parallel test-parity install-dev
 
-# Default: full sequential suite (safe for subprocess/SIGTERM tests)
+# Default: full suite, sequential — safe for subprocess/SIGTERM tests.
+# Includes scripts/kill_test_suite.py (see pytest.ini testpaths).
 test:
-	python3 -m pytest tests/
+	python3 -m pytest -q
 
-# Parallel suite — excludes audit_engine.py (cwd-relative paths break under xdist workers)
-# Uses worksteal scheduler so slow tests don't bottleneck fast workers
+# Pre-commit gate: fast unit tests only, no I/O, no subprocesses.
+# Must complete in <2s. Run this before every commit.
+test-unit:
+	python3 -m pytest -m fast -q
+
+# Pre-push gate: fast + preflight + parity (no subprocess, no DB, no C++ binary).
+# Must complete in <10s.
+test-fast:
+	python3 -m pytest \
+		-m "fast or feature_parity or preflight or live_trader" \
+		-q
+
+# Parallel CI suite — all tests except live, parallel workers via xdist.
+# Requires: pip install pytest-xdist
 test-parallel:
-	python3 -m pytest tests/ \
-		--ignore=tests/audit_engine.py \
+	python3 -m pytest \
 		-n auto \
 		--dist=worksteal \
 		-q
 
-# Fast pre-commit subset: parity, preflight, live_trader state machine
-# Must complete in <10s; no DB, no subprocess, no C++ binary required
-test-fast:
-	python3 -m pytest \
-		-m "feature_parity or preflight or live_trader" \
-		--ignore=tests/audit_engine.py \
-		-q
-
-# CI parity suite (C++/Python + feature vector agreement)
+# C++/Python signal parity only
 test-parity:
 	python3 -m pytest -m "feature_parity or orb_parity" -v
 
-# Install dev deps
+# Install dev deps (includes flask, pytest-xdist, pytest-timeout)
 install-dev:
 	pip install -r requirements-dev.txt

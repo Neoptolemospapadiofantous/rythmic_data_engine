@@ -160,3 +160,200 @@ message DepthByOrder {
   int32  source_usecs           = 150636;
   int32  source_nsecs           = 150637;
 }
+// ORDER_PLANT messages added for nq_executor
+// Append these to ~/rithmic_engine/proto/rithmic.proto
+// All field numbers are the Rithmic API wire field numbers.
+
+// ── Template 308 — Subscribe For Order Updates ────────────────────
+message RequestSubscribeForOrderUpdates {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+  string account_id = 154008;
+}
+
+// ── Template 309 — Subscribe For Order Updates Response ───────────
+message ResponseSubscribeForOrderUpdates {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+}
+
+// ── Template 312 — New Order ───────────────────────────────────────
+// NOTE: template value is 312 per Rithmic API (RequestNewOrder).
+// Template 314 is RequestModifyOrder — do NOT use 314 here.
+message RequestNewOrder {
+  enum Duration {
+    DURATION_UNSPECIFIED = 0;
+    DAY = 1;
+    GTC = 2;
+    IOC = 3;
+    FOK = 4;
+  }
+  enum ManualAuto {
+    MANUAL_AUTO_UNSPECIFIED = 0;
+    MANUAL = 1;
+    AUTO = 2;
+  }
+  int32  template_id        = 154467;
+  string fcm_id             = 154013;
+  string ib_id              = 154014;
+  string account_id         = 154008;
+  string symbol             = 110100;
+  string exchange           = 110101;
+  int32  quantity           = 112004;
+  int32  order_type         = 112008;  // price_type: LIMIT=1 MARKET=2 STOP_LIMIT=3 STOP_MARKET=4
+  int32  transaction_type   = 112003;  // 1=BUY, 2=SELL
+  double price              = 110306;
+  double trigger_price      = 149247;  // correct field number (was 110307)
+  string user_tag           = 154119;  // correct field number (was 132001)
+  Duration duration         = 112005;  // correct field number (was 112016)
+  ManualAuto manual_or_auto_select = 154710;  // correct field number (was 154054)
+  string trade_route        = 112016;  // correct field number (was 154020)
+}
+
+// ── Template 315 — New Order Response ─────────────────────────────
+message ResponseNewOrder {
+  int32 template_id = 154467;
+  repeated string rp_code = 132766;
+  repeated string user_msg = 132760;
+  string basket_id = 110300;
+  string account_id = 154008;
+}
+
+// ── Template 316 — Cancel Order ───────────────────────────────────
+message RequestCancelOrder {
+  int32 template_id = 154467;
+  string basket_id = 110300;
+  string account_id = 154008;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+}
+
+// ── Template 317 — Cancel Order Response ──────────────────────────
+message ResponseCancelOrder {
+  int32 template_id = 154467;
+  repeated string rp_code = 132766;
+  repeated string user_msg = 132760;
+  string basket_id = 110300;
+}
+
+// ── Template 351 — Rithmic Order Notification (internal acks) ─────
+// Covers: ORDER_RCVD_FROM_CLNT, OPEN_PENDING, ORDER_SENT_TO_EXCH, etc.
+// Does NOT carry fill_price — use ExchangeOrderNotification (352) for fills.
+message RithmicOrderNotification {
+  int32 template_id = 154467;
+  string user_tag = 154119;
+  int32 notify_type = 153625;
+  bool is_snapshot = 110121;
+  string status = 110303;
+  string basket_id = 110300;
+  string original_basket_id = 154497;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+  string account_id = 154008;
+  string symbol = 110100;
+  string exchange = 110101;
+  int32 quantity = 112004;
+  double price = 110306;
+  double avg_fill_price = 110322;
+  int32 total_fill_size = 154111;
+  int32 total_unfilled_size = 154112;
+  int32 ssboe = 150100;
+  int32 usecs = 150101;
+}
+
+// ── Template 352 — Exchange Order Notification (fills / rejects) ───
+// NotifyType: STATUS=1 MODIFY=2 CANCEL=3 TRIGGER=4 FILL=5 REJECT=6
+// fill_price (110307) and fill_size (110308) populated on FILL events.
+message ExchangeOrderNotification {
+  int32 template_id = 154467;
+  string user_tag = 154119;
+  int32 notify_type = 153625;
+  bool is_snapshot = 110121;
+  string status = 110303;
+  string basket_id = 110300;
+  string original_basket_id = 154497;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+  string account_id = 154008;
+  string symbol = 110100;
+  string exchange = 110101;
+  int32 quantity = 112004;
+  double price = 110306;
+  double fill_price = 110307;    // actual fill price (FILL events only)
+  int32 fill_size = 110308;      // actual fill quantity
+  string fill_time = 110309;
+  double avg_fill_price = 110322;
+  int32 total_fill_size = 154111;
+  int32 total_unfilled_size = 154112;
+  int32 ssboe = 150100;
+  int32 usecs = 150101;
+  int32 exch_receipt_ssboe = 150405;
+  int32 exch_receipt_nsecs = 150406;
+}
+
+// ── Template 400 — RequestPnLPositionUpdates (subscribe/unsubscribe) ─
+message RequestPnLPositionUpdates {
+  enum Request {
+    REQUEST_UNSPECIFIED = 0;
+    SUBSCRIBE = 1;
+    UNSUBSCRIBE = 2;
+  }
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  Request request = 100000;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+  string account_id = 154008;
+}
+
+// ── Template 401 — ResponsePnLPositionUpdates ─────────────────────
+message ResponsePnLPositionUpdates {
+  int32 template_id = 154467;
+  repeated string user_msg = 132760;
+  repeated string rp_code = 132766;
+}
+
+// ── Template 451 — AccountPnLPositionUpdate (streaming) ───────────
+// Arrives periodically after subscribing via template 400.
+// account_balance, day_pnl, margin_balance are string-encoded decimals.
+message AccountPnLPositionUpdate {
+  int32 template_id = 154467;
+  bool is_snapshot = 110121;
+  string fcm_id = 154013;
+  string ib_id = 154014;
+  string account_id = 154008;
+  int32 fill_buy_qty = 154041;
+  int32 fill_sell_qty = 154042;
+  int32 net_quantity = 156967;
+  string open_position_pnl = 156961;
+  string closed_position_pnl = 156963;
+  string account_balance = 156970;
+  string cash_on_hand = 156971;
+  string margin_balance = 156977;
+  string day_open_pnl = 157954;
+  string day_closed_pnl = 157955;
+  string day_pnl = 157956;
+  string available_buying_power = 157015;
+  int32 ssboe = 150100;
+  int32 usecs = 150101;
+}
+
+// ── Template 113/114 — Front Month Contract ───────────────────────
+message RequestFrontMonthContract {
+  int32  template_id = 154195;
+  string symbol      = 110100;
+  string exchange    = 110101;
+  bool   need_updates = 154196;
+}
+
+message ResponseFrontMonthContract {
+  int32  template_id      = 154195;
+  repeated string rp_code = 132766;
+  string symbol           = 110100;
+  string exchange         = 110101;
+  string trading_symbol   = 157942;
+  string trading_exchange = 157943;
+}
