@@ -32,3 +32,4 @@ models/*.pkl
 models/*.joblib
 # Keep checksums file (committed intentionally)
 !config/model_checksums.json
+*.png
