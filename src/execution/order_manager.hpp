@@ -248,8 +248,9 @@ public:
         if (mfe_now > pos_.mfe) pos_.mfe = mfe_now;
         if (mae_now > pos_.mae) pos_.mae = mae_now;
 
-        // Software SL only fires if no exchange stop is active (fallback for rejected stops)
-        if (pos_.basket_id_stop.empty()) {
+        // Software SL only fires if no exchange stop is active (fallback for rejected stops).
+        // Suppressed while a trail cancel is in-flight (exchange stop still live until ACK).
+        if (pos_.basket_id_stop.empty() && !pending_trail_cancel_) {
             if (is_long && current_price <= pos_.sl_price) {
                 LOG("[OM] Software SL hit (LONG, no exchange stop): price=%.2f sl=%.2f",
                     current_price, pos_.sl_price);
@@ -346,6 +347,7 @@ public:
         double new_sl = pending_new_stop_price_;
         pending_new_stop_price_ = 0.0;
         last_stop_basket_.clear();
+        pending_trail_cancel_ = false;
         if (pos_.state != PosState::LONG && pos_.state != PosState::SHORT) {
             LOG("[OM] Cancel ACK %s — position closed, discarding queued stop", basket_id.c_str());
             return;
@@ -412,6 +414,7 @@ private:
     // Trail stop cancel-then-resubmit state
     std::string last_stop_basket_;          // basket being cancelled for trail update
     double      pending_new_stop_price_ = 0.0; // queued new stop price, submitted on cancel ACK
+    bool        pending_trail_cancel_   = false; // cancel in-flight; suppress software SL until ACK
 
     // Stale stop unwind state (fires when old stop fills after position already closed)
     std::string last_stop_for_unwind_;      // basket of stop sent to cancel at position close
@@ -493,7 +496,8 @@ private:
             LOG("[OM] Trail update: cancelling stop %s, new_sl=%.2f (submit after cancel ACK)",
                 pos_.basket_id_stop.c_str(), new_sl);
             cancel_cb_(pos_.basket_id_stop);
-            pos_.basket_id_stop.clear();  // software SL now active until new stop confirmed
+            pos_.basket_id_stop.clear();  // exchange stop still live; cancel in-flight
+            pending_trail_cancel_ = true; // suppress software SL until cancel ACK
         }
     }
 
@@ -511,7 +515,18 @@ private:
     void initiate_exit_locked(const std::string& reason, double ref_price) {
         if (pos_.state != PosState::LONG && pos_.state != PosState::SHORT) return;
 
-        // Cancel the exchange stop BEFORE submitting market exit to prevent double-fill
+        // Cancel the exchange stop BEFORE submitting market exit to prevent double-fill.
+        // If a trail cancel is in-flight (stop basket already cleared), track the pending
+        // cancel basket for stale-fill detection and clear the trail cancel flag.
+        if (pending_trail_cancel_ && !last_stop_basket_.empty()) {
+            last_stop_for_unwind_ = last_stop_basket_;
+            last_stop_was_buy_    = (pos_.direction == OrbSignal::SELL);
+            LOG("[OM] Exit while trail cancel in-flight: tracking dangling stop %s",
+                last_stop_basket_.c_str());
+            last_stop_basket_.clear();
+            pending_new_stop_price_ = 0.0;
+            pending_trail_cancel_   = false;
+        }
         cancel_stop_locked();
 
         pos_.state       = PosState::PENDING_EXIT;
