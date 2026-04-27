@@ -84,7 +84,8 @@ static void flush_position(OrbDB* db,
                             const std::string& today,
                             const OrderManager& order_mgr,
                             const OrbStrategy& strategy,
-                            bool op_connected) {
+                            bool op_connected,
+                            double point_value = 2.0) {
     if (!db || !db->is_connected()) return;
 
     Position snap = order_mgr.position_snapshot();
@@ -111,8 +112,8 @@ static void flush_position(OrbDB* db,
         unreal_pts = (snap.state == PosState::LONG)
             ? (last_px - snap.entry_price)
             : (snap.entry_price - last_px);
-        // NQ: $20/point, 1 contract, round-trip commission ($4) deducted at close
-        unreal_usd = unreal_pts * 20.0;
+        // MNQ: $2/point, 1 contract, round-trip commission ($4) deducted at close
+        unreal_usd = unreal_pts * point_value;
     }
 
     // entry_time: format fill_time as UTC string (empty if FLAT/PENDING)
@@ -776,7 +777,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                                                    notif.fill_size(),
                                                    is_entry && !is_stop);
                     flush_position(db.get(), today, order_mgr, strategy,
-                                   order_plant->connected);
+                                   order_plant->connected, cfg.point_value);
                 } else if (notify_type == 2) { // MODIFY ACK
                     LOG("[EXECUTOR] Stop MODIFIED by exchange: client=%s server=%s — trail ACKed",
                         notif.user_tag().c_str(), notif.basket_id().c_str());

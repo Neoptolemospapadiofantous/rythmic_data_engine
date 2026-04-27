@@ -14,9 +14,11 @@
 namespace fs = std::filesystem;
 
 // ─── Contract constants (tick geometry is same for NQ and MNQ) ───────────────
-inline constexpr double NQ_TICK_VALUE    = 5.0;    // used by latency logger (display only)
 inline constexpr double NQ_TICK_SIZE     = 0.25;   // minimum price increment (NQ and MNQ)
 inline constexpr double NQ_COMMISSION    = 2.0;    // $ per side
+// Per-tick dollar values differ by contract: NQ=$5.00, MNQ=$0.50
+inline constexpr double NQ_TICK_VALUE    = 5.00;   // NQ only — do NOT use for MNQ slippage
+inline constexpr double MNQ_TICK_VALUE   = 0.50;   // MNQ = 2.0 $/pt × 0.25 tick
 
 // ─── US Eastern Time offset (EDT=4, EST=5) ───────────────────────────────────
 // Proper DST rule: second Sunday of March at 07:00 UTC (2:00 AM EST)

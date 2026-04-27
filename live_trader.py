@@ -314,7 +314,7 @@ class LiveTrader:
         self._config = config
         self._dry_run = dry_run
         self._symbol: str = config.get("symbol", "NQ")
-        self._point_value: float = float(config["orb"].get("point_value", 20.0))
+        self._point_value: float = float(config["orb"].get("point_value", 2.0))
         self._log = logging.getLogger("live_trader")
         self._strategy = MicroORBStrategy(config)
         self._conn: Optional[object] = None

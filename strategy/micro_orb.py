@@ -9,7 +9,7 @@ Doctest example (verifiable with: python -m doctest strategy/micro_orb.py -v):
     >>> import datetime, zoneinfo
     >>> ET = zoneinfo.ZoneInfo("America/New_York")
     >>> cfg = {"orb": {"orb_period_minutes": 5, "stop_loss_ticks": 16,
-    ...     "target_ticks": 48, "tick_size": 0.25, "point_value": 20.0,
+    ...     "target_ticks": 48, "tick_size": 0.25, "point_value": 2.0,
     ...     "rth_open": "09:30:00", "rth_close": "16:00:00",
     ...     "eod_exit_minutes_before_close": 15, "allow_short": True}}
     >>> s = MicroORBStrategy(cfg)
@@ -97,7 +97,7 @@ class MicroORBStrategy:
         self._sl_ticks: int = int(orb["stop_loss_ticks"])
         self._target_ticks: int = int(orb["target_ticks"])
         self._tick: float = float(orb["tick_size"])
-        self._point_value: float = float(orb.get("point_value", 20.0))
+        self._point_value: float = float(orb.get("point_value", 2.0))
         self._allow_short: bool = bool(orb.get("allow_short", True))
         self._eod_cutoff_minutes: int = int(orb.get("eod_exit_minutes_before_close", 15))
 

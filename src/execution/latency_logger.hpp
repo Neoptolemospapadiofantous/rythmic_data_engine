@@ -10,7 +10,7 @@
       - signal_price  : price at signal time (for slippage calc)
 
     Slippage in ticks = |fill_price - signal_price| / NQ_TICK_SIZE
-    Slippage in USD   = ticks × $5
+    Slippage in USD   = ticks × MNQ_TICK_VALUE ($0.50/tick for MNQ)
     ═══════════════════════════════════════════════════════════════════════════ */
 #include "orb_config.hpp"
 #include "log.hpp"
@@ -104,7 +104,7 @@ private:
 
         double diff = std::abs(r.fill_price - r.signal_price);
         r.slippage_ticks = static_cast<int>(std::round(diff / NQ_TICK_SIZE));
-        r.slippage_usd   = r.slippage_ticks * NQ_TICK_VALUE;
+        r.slippage_usd   = r.slippage_ticks * MNQ_TICK_VALUE;
     }
 
     static int64_t now_ns() {
