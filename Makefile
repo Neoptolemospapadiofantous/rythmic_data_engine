@@ -31,12 +31,18 @@ test-parity:
 
 # Run all quality audit scripts (formula, cross-system, Python standards, C++ standards)
 audit:
-	bash scripts/quality_gate.sh
+	python3 scripts/formula_audit.py
+	python3 scripts/cross_system_audit.py
+	python3 scripts/python_standards_check.py
+	python3 scripts/cpp_standards_check.py
+	@echo 'All audit gates passed'
 
 # Full quality gate: fast tests + all audit checks
 quality-gate:
-	python3 -m pytest -m "fast or feature_parity or preflight or live_trader" -q
-	bash scripts/quality_gate.sh
+	python3 -m pytest \
+		-m "fast or feature_parity or preflight or live_trader" \
+		-q
+	$(MAKE) audit
 
 # Install dev deps (includes flask, pytest-xdist, pytest-timeout)
 install-dev:
