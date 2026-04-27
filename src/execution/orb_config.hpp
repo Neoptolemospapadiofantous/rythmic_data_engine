@@ -150,11 +150,11 @@ struct OrbConfig {
         if (c.pg_password.empty())
             c.pg_password = env("RITHMIC_PG_PASSWORD", "");
 
-        // AMP credentials for TICKER_PLANT (market data feed)
-        c.md_user        = env("RITHMIC_AMP_USER",     "");
-        c.md_password    = env("RITHMIC_AMP_PASSWORD",  "");
-        c.md_system_name = env("RITHMIC_AMP_SYSTEM",   "Rithmic 01");
-        c.md_url         = env("RITHMIC_AMP_URL",       c.md_url.c_str());
+        // Legends credentials for TICKER_PLANT (market data — same server as order plant)
+        c.md_user        = env("RITHMIC_LEGENDS_USER",     "");
+        c.md_password    = env("RITHMIC_LEGENDS_PASSWORD",  "");
+        c.md_system_name = env("RITHMIC_LEGENDS_SYSTEM",   "LegendsTrading");
+        c.md_url         = env("RITHMIC_LEGENDS_URL",       c.md_url.c_str());
 
         // Legends credentials for ORDER_PLANT (execution)
         c.rithmic_user        = env("RITHMIC_LEGENDS_USER",     "");
