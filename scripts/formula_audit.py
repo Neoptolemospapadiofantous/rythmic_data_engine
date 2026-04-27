@@ -291,6 +291,62 @@ def check_prop_firm_limits(cfg: dict) -> list[dict]:
     return findings
 
 
+def check_config_invariants(cfg: dict) -> list[dict]:
+    """Verify INV-006/007/008: trade_route, risk flat keys, max_daily_trades consistency."""
+    findings = []
+
+    # INV-006: trade_route must not be 'simulator'
+    route = cfg.get("trade_route", "")
+    if route == "simulator":
+        findings.append(_fail("trade_route_not_simulator",
+            "trade_route='simulator' — live orders will go to Rithmic paper system "
+            "even with dry_run=False. Set to 'Rithmic Order Routing'."))
+    else:
+        findings.append(_pass("trade_route_not_simulator",
+            f"trade_route='{route}' (not simulator)"))
+
+    # INV-007: trailing_drawdown_cap and consistency_cap_pct flat keys must exist and match prop_firm
+    prop = cfg.get("prop_firm", {})
+    risk_checks = [
+        ("trailing_drawdown_cap", "prop_firm.trailing_drawdown_limit",
+         prop.get("trailing_drawdown_limit")),
+        ("consistency_cap_pct",   "prop_firm.consistency_rule_pct",
+         prop.get("consistency_rule_pct")),
+    ]
+    for flat_key, nested_label, nested_val in risk_checks:
+        flat_val = cfg.get(flat_key)
+        if flat_val is None:
+            findings.append(_fail(f"risk_flat_{flat_key}",
+                f"Flat '{flat_key}' missing — C++ risk_manager uses hardcoded default, "
+                f"not driven by config"))
+        elif nested_val is not None and abs(float(flat_val) - float(nested_val)) > 0.001:
+            findings.append(_fail(f"risk_flat_{flat_key}",
+                f"flat '{flat_key}'={flat_val} != {nested_label}={nested_val}"))
+        else:
+            label = f"={nested_val}" if nested_val is not None else ""
+            findings.append(_pass(f"risk_flat_{flat_key}",
+                f"flat '{flat_key}'={flat_val} matches {nested_label}{label}"))
+
+    # INV-008: flat max_daily_trades must equal prop_firm.max_daily_trades
+    flat_mdt = cfg.get("max_daily_trades")
+    prop_mdt = prop.get("max_daily_trades")
+    if flat_mdt is None:
+        findings.append(_fail("max_daily_trades_match",
+            "Flat 'max_daily_trades' missing — C++ uses default"))
+    elif prop_mdt is None:
+        findings.append(_warn("max_daily_trades_match",
+            f"prop_firm.max_daily_trades missing — cannot verify flat={flat_mdt} is within limits"))
+    elif flat_mdt != prop_mdt:
+        findings.append(_fail("max_daily_trades_match",
+            f"flat max_daily_trades={flat_mdt} != prop_firm.max_daily_trades={prop_mdt} — "
+            f"C++ will allow {flat_mdt} trades but Legends limit is {prop_mdt}"))
+    else:
+        findings.append(_pass("max_daily_trades_match",
+            f"flat max_daily_trades={flat_mdt} == prop_firm.max_daily_trades={prop_mdt}"))
+
+    return findings
+
+
 def main():
     parser = argparse.ArgumentParser(description="Formula Audit — MNQ ORB constants and PnL formulas")
     parser.add_argument("--json", action="store_true", help="JSON output")
@@ -322,6 +378,7 @@ def main():
     all_findings.extend(check_constants(rules, cfg))
     all_findings.extend(check_pnl_formulas(rules, cfg))
     all_findings.extend(check_prop_firm_limits(cfg))
+    all_findings.extend(check_config_invariants(cfg))
 
     passed = sum(1 for f in all_findings if f["status"] == "PASS")
     failed = sum(1 for f in all_findings if f["status"] == "FAIL")
