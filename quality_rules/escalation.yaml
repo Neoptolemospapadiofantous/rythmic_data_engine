@@ -1,0 +1,75 @@
+version: 1
+description: "Alert escalation policy for rithmic_engine MNQ quality audit system"
+
+rules:
+  - name: warn_escalation
+    condition: "3+ WARN from same source in 60 minutes"
+    action: escalate_to_error
+    message: "Repeated warnings from {source} — escalating to ERROR"
+
+  - name: error_timeout
+    condition: "ERROR unresolved for 30 minutes"
+    action: escalate_to_critical
+    message: "ERROR from {source} unresolved for 30+ minutes — escalating to CRITICAL"
+
+  - name: critical_halt
+    condition: "CRITICAL from live_trader or fill_validator"
+    action: halt_trading
+    notify: true
+    message: "CRITICAL trading system event — halt trading immediately"
+
+  - name: auto_resolve
+    condition: "2 consecutive clean audit passes after ERROR"
+    action: resolve
+    message: "2 clean passes — resolving {event}"
+
+  - name: point_value_mismatch_critical
+    condition: "point_value != 2.0 detected at runtime"
+    severity: CRITICAL
+    action: halt_trading
+    notify: true
+    message: "CRITICAL: point_value mismatch — MNQ requires 2.0, got {value}. Halting to prevent 10x PnL error."
+
+  - name: tick_value_mismatch_critical
+    condition: "tick_value != 0.50 detected at runtime"
+    severity: CRITICAL
+    action: halt_trading
+    notify: true
+    message: "CRITICAL: tick_value mismatch — MNQ tick_value must be 0.50, got {value}."
+
+  - name: symbol_mismatch_warn
+    condition: "symbol != 'MNQ' at startup"
+    severity: WARN
+    action: log_and_notify
+    message: "WARN: Trading symbol is '{symbol}' — expected 'MNQ'. Verify config."
+
+  - name: pnl_sanity_check
+    condition: "abs(trade_pnl_usd) > 500 for 1 contract MNQ"
+    severity: WARN
+    action: log_and_flag
+    message: "WARN: Unusually large PnL ${trade_pnl_usd} for 1 MNQ contract — verify point_value in config."
+    rationale: "500 points * $2/point = $1000 max reasonable single-trade PnL for MNQ"
+
+  - name: commission_sanity_check
+    condition: "commission_rt != 4.0 per trade"
+    severity: ERROR
+    action: log_and_notify
+    message: "ERROR: Commission RT is ${commission_rt} — expected $4.00 for MNQ (2x $2.00/side)"
+
+alert_channels:
+  file: "data/alerts/critical.json"
+  desktop_notify: true
+  log_file: "data/alerts/audit.log"
+
+audit_schedule:
+  on_startup: true
+  on_each_trade: true
+  periodic_interval_minutes: 60
+
+priority_checks:
+  - "point_value == 2.0"
+  - "tick_value == 0.50"
+  - "symbol == 'MNQ'"
+  - "commission_rt == 4.0"
+  - "CPP-BUG-001 NQ_TICK_VALUE=5.0 still in orb_config.hpp"
+  - "PY-BUG-002 live_trader default point_value=20.0 still unfixed"

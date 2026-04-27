@@ -1,0 +1,184 @@
+version: 1
+description: "Formula definitions and test vectors for MNQ ORB Live Trading (rithmic_engine)"
+
+constants:
+  SYMBOL: "MNQ"
+  EXCHANGE: "CME"
+  POINT_VALUE: 2.0       # MNQ = $2/point (NQ = $20/point — do NOT confuse)
+  TICK_SIZE: 0.25
+  TICK_VALUE: 0.50       # = POINT_VALUE * TICK_SIZE = 2.0 * 0.25
+  COMMISSION_PER_SIDE: 2.00
+  COMMISSION_RT: 4.00    # = COMMISSION_PER_SIDE * 2
+
+formulas:
+  - id: FORMULA-001
+    name: gross_pnl_long
+    description: "Long gross PnL = (exit - entry) * POINT_VALUE * qty"
+    source_file: "live_trader.py"
+    source_function: "_calc_pnl_usd"
+    formula: "pnl_usd = (exit - entry) * point_value * qty"
+    test_cases:
+      - { entry: 21000.0, exit: 21010.0, direction: "long", qty: 1, expected_gross: 20.0 }
+      - { entry: 21000.0, exit: 20990.0, direction: "long", qty: 1, expected_gross: -20.0 }
+      - { entry: 21000.0, exit: 21000.0, direction: "long", qty: 1, expected_gross: 0.0 }
+
+  - id: FORMULA-002
+    name: gross_pnl_short
+    description: "Short gross PnL = (entry - exit) * POINT_VALUE * qty"
+    formula: "pnl_usd = (entry - exit) * point_value * qty"
+    test_cases:
+      - { entry: 21010.0, exit: 21000.0, direction: "short", qty: 1, expected_gross: 20.0 }
+      - { entry: 21000.0, exit: 21010.0, direction: "short", qty: 1, expected_gross: -20.0 }
+
+  - id: FORMULA-003
+    name: net_pnl
+    description: "Net PnL = gross_pnl - COMMISSION_RT (Rithmic fills include slippage — NOT deducted separately)"
+    formula: "net_pnl = gross_pnl - commission_rt"
+    note: "Python live_trader does NOT deduct slippage from net_pnl — Rithmic fill prices include slippage implicitly"
+    test_cases:
+      - { gross: 20.0, commission_rt: 4.0, expected_net: 16.0 }
+      - { gross: 0.0, commission_rt: 4.0, expected_net: -4.0 }
+      - { gross: -20.0, commission_rt: 4.0, expected_net: -24.0 }
+
+  - id: FORMULA-004
+    name: pnl_points
+    description: "PnL in points = direction_mult * (exit - entry); direction_mult = +1 LONG, -1 SHORT"
+    formula: "pnl_points = direction_mult * (exit - entry)"
+    test_cases:
+      - { entry: 21000.0, exit: 21010.0, direction: "long", expected_points: 10.0 }
+      - { entry: 21010.0, exit: 21000.0, direction: "short", expected_points: 10.0 }
+      - { entry: 21000.0, exit: 20990.0, direction: "long", expected_points: -10.0 }
+
+  - id: FORMULA-005
+    name: ticks_from_points
+    description: "Ticks = points / TICK_SIZE"
+    formula: "ticks = points / 0.25"
+    test_cases:
+      - { points: 10.0, expected_ticks: 40.0 }
+      - { points: 0.25, expected_ticks: 1.0 }
+      - { points: -5.0, expected_ticks: -20.0 }
+      - { points: 15.0, expected_ticks: 60.0 }  # sl_points default
+
+  - id: FORMULA-006
+    name: tick_value_derived
+    description: "TICK_VALUE = POINT_VALUE * TICK_SIZE"
+    invariant: "TICK_VALUE == POINT_VALUE * TICK_SIZE"
+    formula: "tick_value = 2.0 * 0.25"
+    expected: 0.50
+    note: "MNQ tick_value = $0.50. C++ NQ_TICK_VALUE=5.0 in orb_config.hpp is WRONG for MNQ — BUG CPP-BUG-001"
+
+  - id: FORMULA-007
+    name: commission_round_trip
+    description: "Commission RT = COMMISSION_PER_SIDE * 2"
+    invariant: "COMMISSION_RT == COMMISSION_PER_SIDE * 2"
+    formula: "commission_rt = 2.0 * 2"
+    expected: 4.0
+
+  - id: FORMULA-008
+    name: sl_price_long
+    description: "Long stop-loss price = entry - sl_points"
+    formula: "sl_price = entry - sl_points"
+    test_cases:
+      - { entry: 21000.0, sl_points: 15.0, direction: "long", expected_sl: 20985.0 }
+      - { entry: 21010.0, sl_points: 15.0, direction: "long", expected_sl: 20995.0 }
+
+  - id: FORMULA-009
+    name: sl_price_short
+    description: "Short stop-loss price = entry + sl_points"
+    formula: "sl_price = entry + sl_points"
+    test_cases:
+      - { entry: 21000.0, sl_points: 15.0, direction: "short", expected_sl: 21015.0 }
+
+  - id: FORMULA-010
+    name: target_price_long
+    description: "Long target price = entry + target_points"
+    formula: "target_price = entry + target_points"
+    test_cases:
+      - { entry: 21000.0, target_points: 20.0, direction: "long", expected_target: 21020.0 }
+
+  - id: FORMULA-011
+    name: target_price_short
+    description: "Short target price = entry - target_points"
+    formula: "target_price = entry - target_points"
+    test_cases:
+      - { entry: 21000.0, target_points: 20.0, direction: "short", expected_target: 20980.0 }
+
+  - id: FORMULA-012
+    name: pnl_extreme_prices
+    description: "PnL must be finite for extreme but valid MNQ prices"
+    test_cases:
+      - { entry: 30000.0, exit: 30100.0, direction: "long", qty: 1, expected_gross: 200.0 }
+      - { entry: 10000.0, exit: 10001.0, direction: "long", qty: 1, expected_gross: 2.0 }
+      - { entry: 22000.0, exit: 22000.0, direction: "long", qty: 1, expected_gross: 0.0 }
+
+test_vectors:
+  description: "Golden test vectors for MNQ, 1 contract"
+  vectors:
+    - id: TV-001
+      label: "Long winner"
+      entry: 21000.0
+      exit: 21010.0
+      direction: "long"
+      qty: 1
+      gross_pnl: 20.0
+      net_pnl: 16.0
+      pnl_points: 10.0
+      pnl_ticks: 40
+    - id: TV-002
+      label: "Short winner"
+      entry: 21010.0
+      exit: 21000.0
+      direction: "short"
+      qty: 1
+      gross_pnl: 20.0
+      net_pnl: 16.0
+      pnl_points: 10.0
+      pnl_ticks: 40
+    - id: TV-003
+      label: "Long loser"
+      entry: 21000.0
+      exit: 20990.0
+      direction: "long"
+      qty: 1
+      gross_pnl: -20.0
+      net_pnl: -24.0
+      pnl_points: -10.0
+      pnl_ticks: -40
+    - id: TV-004
+      label: "Long SL price"
+      entry: 21000.0
+      sl_points: 15.0
+      direction: "long"
+      expected_sl_price: 20985.0
+
+invariants:
+  - id: INV-001
+    name: quantity_always_one
+    description: "All MNQ trades must have qty=1 (single MNQ contract per Legends 50K rules)"
+    source_file: "src/execution/orb_config.hpp"
+    check: "config_value"
+    expected: "qty == 1"
+
+  - id: INV-002
+    name: point_value_always_2
+    description: "point_value must always be 2.0 for MNQ — never 20.0 (NQ)"
+    check: "runtime"
+    expected: "point_value == 2.0"
+
+  - id: INV-003
+    name: tick_value_always_050
+    description: "tick_value = POINT_VALUE * TICK_SIZE must equal 0.50 for MNQ"
+    check: "derived"
+    expected: "tick_value == 0.50"
+
+  - id: INV-004
+    name: net_pnl_less_than_gross_winner
+    description: "For winners, net_pnl < gross_pnl (commission reduces it)"
+    check: "runtime"
+    invariant: "gross_pnl > 0 => net_pnl == gross_pnl - 4.0"
+
+  - id: INV-005
+    name: net_pnl_worse_than_gross_loser
+    description: "For losers, net_pnl < gross_pnl (commission makes it worse)"
+    check: "runtime"
+    invariant: "gross_pnl <= 0 => net_pnl == gross_pnl - 4.0"

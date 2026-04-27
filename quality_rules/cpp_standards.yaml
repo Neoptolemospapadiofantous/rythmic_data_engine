@@ -1,0 +1,135 @@
+version: 1
+description: "C++ coding standards for rithmic_engine MNQ ORB execution engine"
+
+rules:
+  - id: CPP-001
+    name: no_hardcoded_monetary_constants
+    severity: ERROR
+    check: "manual_review"
+    description: "All monetary constants must be configurable via OrbConfig — not hardcoded in logic"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    known_violations:
+      - id: CPP-BUG-001
+        file: "src/execution/orb_config.hpp"
+        constant: "NQ_TICK_VALUE"
+        current_value: 5.0
+        correct_value: 0.50
+        impact: "Latency logger slippage_usd is 10x inflated"
+        fix: "Remove or rename to MNQ_TICK_VALUE=0.50, or derive from cfg_.point_value * NQ_TICK_SIZE"
+    message: "Monetary constants must use cfg_.point_value from OrbConfig, not hardcoded NQ_TICK_VALUE"
+
+  - id: CPP-002
+    name: dollar_calcs_use_cfg_point_value
+    severity: ERROR
+    check: regex_absent
+    pattern: "NQ_TICK_VALUE\\s*\\*"
+    scope: "src/**/*.cpp"
+    message: "Dollar calculations must use cfg_.point_value * tick_size, not NQ_TICK_VALUE (wrong for MNQ)"
+
+  - id: CPP-003
+    name: no_hardcoded_nq_symbol_in_defaults
+    severity: WARN
+    check: "manual_review"
+    description: "OrbConfig struct defaults must not hardcode 'NQ' when trading MNQ"
+    scope: "src/execution/orb_config.hpp"
+    note: "Defaults should be 'MNQ' or clearly documented as requiring config override"
+    known_violations:
+      - file: "src/execution/orb_config.hpp"
+        detail: "symbol default may be 'NQ' — must be overridden by orb_config.json"
+
+  - id: CPP-004
+    name: comments_match_contract
+    severity: WARN
+    check: regex_absent
+    pattern: "NQ.*\\$20.*point|\\$20.*point.*NQ"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    message: "Comments must reflect MNQ contract ($2/point), not NQ ($20/point)"
+    known_violations:
+      - file: "src/execution/executor_main.cpp"
+        detail: "Comment says 'NQ: $20/point' — wrong for MNQ, should be 'MNQ: $2/point'"
+
+  - id: CPP-005
+    name: no_raw_new
+    severity: ERROR
+    check: regex_absent
+    pattern: "\\bnew\\s+\\w"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    exclude: ["test_*.cpp", "build/*"]
+    message: "Use std::make_unique/make_shared instead of raw new"
+
+  - id: CPP-006
+    name: no_raw_delete
+    severity: ERROR
+    check: regex_absent
+    pattern: "\\bdelete\\s+"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    exclude: ["test_*.cpp"]
+    message: "Use RAII/smart pointers — no manual delete"
+
+  - id: CPP-007
+    name: pragma_once_in_headers
+    severity: ERROR
+    check: regex_present
+    pattern: "#pragma once"
+    scope: "src/**/*.hpp"
+    message: "All headers must use #pragma once"
+
+  - id: CPP-008
+    name: no_using_namespace_std_in_headers
+    severity: WARN
+    check: regex_absent
+    pattern: "using\\s+namespace\\s+std"
+    scope: "src/**/*.hpp"
+    message: "Do not use 'using namespace std' in headers"
+
+  - id: CPP-009
+    name: no_c_style_casts
+    severity: WARN
+    check: regex_absent
+    pattern: "\\(\\s*(int|double|float|long|char|unsigned|size_t|int32_t|int64_t|uint32_t)\\s*\\)"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    exclude: ["test_*.cpp"]
+    message: "Use static_cast<>/reinterpret_cast<> instead of C-style casts"
+
+  - id: CPP-010
+    name: no_goto
+    severity: ERROR
+    check: regex_absent
+    pattern: "\\bgoto\\s+"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    message: "goto is forbidden — use structured control flow"
+
+  - id: CPP-011
+    name: no_printf_in_production
+    severity: WARN
+    check: regex_absent
+    pattern: "\\bprintf\\s*\\("
+    scope: "src/**/*.cpp"
+    exclude: ["test_*.cpp"]
+    message: "Use LOG() macro instead of printf in production code"
+
+  - id: CPP-012
+    name: no_exit_in_library
+    severity: ERROR
+    check: regex_absent
+    pattern: "\\bexit\\s*\\("
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    exclude: ["main.cpp", "executor_main.cpp", "test_*.cpp"]
+    message: "exit() forbidden in library code — throw or return error codes"
+
+  - id: CPP-013
+    name: no_std_endl
+    severity: WARN
+    check: regex_absent
+    pattern: "std::endl"
+    scope: "src/**/*.cpp,src/**/*.hpp"
+    message: "Use '\\n' instead of std::endl to avoid unnecessary flush"
+
+  - id: CPP-014
+    name: orb_config_point_value_correct_default
+    severity: ERROR
+    check: "manual_review"
+    description: "OrbConfig::point_value must default to 2.0 (MNQ) — any reference to 20.0 is wrong"
+    scope: "src/execution/orb_config.hpp"
+    expected_default: 2.0
+    incorrect_default: 20.0

@@ -1,0 +1,133 @@
+version: 1
+description: "Python coding standards for rithmic_engine MNQ live trading system"
+
+rules:
+  - id: PY-001
+    name: no_silent_exceptions
+    severity: ERROR
+    check: regex_absent
+    pattern: "except\\s*(Exception|BaseException)?\\s*:\\s*pass\\s*$"
+    scope: "*.py,strategy/*.py,ui/**/*.py"
+    exclude: ["test_*.py", "conftest.py"]
+    message: "Silent exception swallowing forbidden — log at minimum"
+
+  - id: PY-002
+    name: no_bare_except
+    severity: ERROR
+    check: regex_absent
+    pattern: "^\\s*except\\s*:"
+    scope: "*.py,strategy/*.py,ui/**/*.py"
+    exclude: ["test_*.py"]
+    message: "Bare except: forbidden — catch specific exceptions"
+
+  - id: PY-003
+    name: no_hardcoded_nq_point_value
+    severity: ERROR
+    check: regex_absent
+    pattern: "point_value.*=.*20\\.0|=.*20\\.0.*point|get\\s*\\(.*20\\.0"
+    scope: "strategy/*.py,live_trader.py"
+    exclude: ["test_*.py", "conftest.py"]
+    message: "Hardcoded NQ point_value=20.0 is WRONG for MNQ — must come from config (MNQ point_value=2.0)"
+    known_violations:
+      - file: "strategy/micro_orb.py"
+        line: 12
+        detail: "Docstring example shows point_value: 20.0"
+      - file: "strategy/micro_orb.py"
+        line: 100
+        detail: "orb.get('point_value', 20.0) — wrong default"
+      - file: "live_trader.py"
+        line: 317
+        detail: "config['orb'].get('point_value', 20.0) — wrong default"
+
+  - id: PY-004
+    name: no_naive_datetime
+    severity: WARN
+    check: regex_absent
+    pattern: "datetime\\.now\\(\\)(?!\\s*#)"
+    scope: "live_trader.py,strategy/*.py"
+    message: "Use datetime.now(timezone.utc) for timezone-aware datetimes in live trading"
+
+  - id: PY-005
+    name: no_hardcoded_commission_in_strategy
+    severity: ERROR
+    check: regex_absent
+    pattern: "commission.*=.*[0-9]+\\.?[0-9]*(?!.*config|.*COMMISSION)"
+    scope: "strategy/*.py"
+    exclude: ["test_*.py"]
+    message: "Hardcoded commission in strategy files forbidden — use config value or COMMISSION_RT constant"
+
+  - id: PY-006
+    name: all_closes_via_write_trade_close
+    severity: ERROR
+    check: "manual_review"
+    description: "All trade closes must call _write_trade_close() — no direct inline PnL calculation"
+    scope: "live_trader.py"
+    rationale: "Centralizes PnL accounting; prevents formula drift"
+
+  - id: PY-007
+    name: no_hardcoded_nq_symbol
+    severity: WARN
+    check: regex_absent
+    pattern: "symbol.*=.*['\"]NQ['\"](?!.*#.*mnq|.*#.*config)"
+    scope: "live_trader.py,strategy/*.py"
+    exclude: ["test_*.py"]
+    message: "Hardcoded symbol 'NQ' — trading MNQ; value should come from config"
+    known_violations:
+      - file: "live_trader.py"
+        line: 316
+        detail: "config.get('symbol', 'NQ') — default should be 'MNQ'"
+
+  - id: PY-008
+    name: no_wildcard_imports
+    severity: WARN
+    check: regex_absent
+    pattern: "^from\\s+\\w+\\s+import\\s+\\*"
+    scope: "*.py,strategy/*.py"
+    exclude: ["__init__.py"]
+    message: "Wildcard imports forbidden — import specific names"
+
+  - id: PY-009
+    name: no_debug_prints_in_core
+    severity: WARN
+    check: regex_absent
+    pattern: "^\\s*print\\((?!.*flush)"
+    scope: "strategy/*.py,live_trader.py"
+    exclude: ["test_*.py"]
+    message: "Use logging instead of print() in core trading modules"
+
+  - id: PY-010
+    name: no_float_equality_pnl
+    severity: WARN
+    check: regex_absent
+    pattern: "pnl\\s*==\\s*0\\.0|pnl\\s*!=\\s*0\\.0"
+    scope: "*.py,strategy/*.py"
+    message: "Float equality on PnL — use abs(pnl) < epsilon or math.isclose()"
+
+  - id: PY-011
+    name: point_value_from_config_only
+    severity: ERROR
+    check: "manual_review"
+    description: "point_value must ALWAYS be read from config['orb']['point_value'] — never hardcoded"
+    scope: "live_trader.py,strategy/*.py"
+    correct_pattern: "config['orb'].get('point_value', 2.0)"
+    incorrect_patterns:
+      - "config['orb'].get('point_value', 20.0)  # wrong default"
+      - "point_value = 20.0                        # wrong hardcode"
+
+  - id: PY-012
+    name: no_mutable_default_args
+    severity: WARN
+    check: regex_absent
+    pattern: "def\\s+\\w+\\(.*=\\s*\\[\\]|def\\s+\\w+\\(.*=\\s*\\{\\}"
+    scope: "*.py,strategy/*.py"
+    exclude: ["test_*.py"]
+    message: "Mutable default arguments are a common bug — use None and initialize inside"
+
+  - id: PY-013
+    name: commission_rt_is_4_dollars
+    severity: ERROR
+    check: regex_absent
+    pattern: "commission.*4\\.50|commission.*4\\.5[^0-9]"
+    scope: "*.py,strategy/*.py"
+    exclude: ["test_*.py"]
+    message: "Commission is $2/side ($4 RT) for MNQ — not $4.50"
