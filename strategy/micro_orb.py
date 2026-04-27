@@ -1,5 +1,5 @@
 """
-MicroORBStrategy — Opening Range Breakout for NQ futures.
+MicroORBStrategy — Opening Range Breakout for MNQ futures.
 
 State machine: WAITING → ORB_BUILDING → WATCHING → IN_POSITION → FLAT
 

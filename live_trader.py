@@ -201,10 +201,10 @@ def _submit_order(signal: Signal, config: dict, dry_run: bool, log: logging.Logg
 # ── trade DB writes ───────────────────────────────────────────────────────────
 
 def _write_trade_open(conn, session_date: datetime.date, signal: Signal,
-                      order_id: str, dry_run: bool) -> int:
+                      order_id: str, dry_run: bool, symbol: str = "MNQ") -> int:
     t = Trade(
         session_date=session_date,
-        symbol="NQ",
+        symbol=symbol,
         direction=signal.direction,
         entry_price=signal.entry_price,
         stop_loss=signal.stop_loss,
@@ -313,7 +313,7 @@ class LiveTrader:
     def __init__(self, config: dict, dry_run: bool) -> None:
         self._config = config
         self._dry_run = dry_run
-        self._symbol: str = config.get("symbol", "NQ")
+        self._symbol: str = config.get("symbol", "MNQ")
         self._point_value: float = float(config["orb"].get("point_value", 2.0))
         self._log = logging.getLogger("live_trader")
         self._strategy = MicroORBStrategy(config)
@@ -454,7 +454,7 @@ class LiveTrader:
             self._log.error("order submission failed — not entering position")
             return
         self._active_trade_id = _write_trade_open(
-            self._conn, self._session_date, signal, order_id, self._dry_run)
+            self._conn, self._session_date, signal, order_id, self._dry_run, self._symbol)
         self._log.info("trade_open id=%s direction=%s entry=%s sl=%s target=%s dry_run=%s",
                        self._active_trade_id, signal.direction, signal.entry_price,
                        signal.stop_loss, signal.target, self._dry_run)
