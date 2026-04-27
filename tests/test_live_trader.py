@@ -513,10 +513,10 @@ class TestDailyPnl(unittest.TestCase):
             trader._conn = mock_conn
 
             self.assertEqual(trader._daily_pnl, 0.0)
-            exit_price = 17010.0  # +10 pts × 20 = +$200
+            exit_price = 17010.0  # +10 pts × 20 - $4 commission = +$196
             trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "TARGET_HIT")
 
-            self.assertAlmostEqual(trader._daily_pnl, 200.0, places=2,
+            self.assertAlmostEqual(trader._daily_pnl, 196.0, places=2,
                                    msg="_daily_pnl must accumulate realized P&L after exit")
 
     def test_daily_pnl_negative_on_loss(self):
@@ -538,10 +538,10 @@ class TestDailyPnl(unittest.TestCase):
             mock_conn.cursor.return_value = mock_cursor
             trader._conn = mock_conn
 
-            exit_price = 16996.0  # -4 pts × 20 = -$80
+            exit_price = 16996.0  # -4 pts × 20 - $4 commission = -$84
             trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "SL_HIT")
 
-            self.assertAlmostEqual(trader._daily_pnl, -80.0, places=2,
+            self.assertAlmostEqual(trader._daily_pnl, -84.0, places=2,
                                    msg="_daily_pnl must go negative on losing trade")
 
     def test_write_trade_close_returns_pnl(self):
@@ -554,11 +554,11 @@ class TestDailyPnl(unittest.TestCase):
         mock_cursor.fetchone.return_value = {"direction": "SHORT", "entry_price": 17050.0}
         mock_conn.cursor.return_value = mock_cursor
 
-        # SHORT: entry 17050, exit 17030 → +20 pts × 20 = $400
+        # SHORT: entry 17050, exit 17030 → +20 pts × 20 - $4 commission = $396
         result = live_trader._write_trade_close(
             mock_conn, 1, 17030.0, datetime.datetime.now(tz=ET), "TARGET_HIT", 20.0)
         self.assertIsInstance(result, float, "_write_trade_close must return float")
-        self.assertAlmostEqual(result, 400.0, places=2)
+        self.assertAlmostEqual(result, 396.0, places=2)
 
     def test_write_trade_close_returns_zero_for_missing_trade(self):
         """_write_trade_close must return 0.0 when trade_id not found."""

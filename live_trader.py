@@ -226,7 +226,8 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
         direction = row["direction"]
         entry = float(row["entry_price"])
         pts = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
-        pnl_usd = pts * point_value
+        commission_rt = 4.0  # $2/side × 2 sides (Rithmic/Legends MNQ RT commission)
+        pnl_usd = pts * point_value - commission_rt
         cur.execute("""
             UPDATE trades
             SET exit_price = %s, exit_time = %s, pnl_points = %s,
@@ -253,7 +254,7 @@ def _poll_latest_bar(conn, symbol: str, since_ts: Optional[datetime.datetime]) -
     with conn.cursor() as cur:
         if since_ts:
             cur.execute("""
-                SELECT bucket AS ts,
+                SELECT time_bucket('1 minute', ts_event) AS ts,
                        first(price, ts_event) AS open,
                        max(price)             AS high,
                        min(price)             AS low,
@@ -261,9 +262,9 @@ def _poll_latest_bar(conn, symbol: str, since_ts: Optional[datetime.datetime]) -
                        sum(size)              AS volume
                 FROM   ticks
                 WHERE  symbol = %s AND ts_event >= %s
-                  AND  date_trunc('minute', ts_event) > date_trunc('minute', %s)
-                GROUP  BY bucket
-                ORDER  BY bucket DESC
+                  AND  time_bucket('1 minute', ts_event) > time_bucket('1 minute', %s)
+                GROUP  BY ts
+                ORDER  BY ts DESC
                 LIMIT  1
             """, (symbol, since_ts, since_ts))
         else:
