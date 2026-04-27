@@ -575,5 +575,76 @@ class TestDailyPnl(unittest.TestCase):
         self.assertEqual(result, 0.0)
 
 
+@pytest.mark.fast
+class TestLiveConfigSchema(unittest.TestCase):
+    """Pydantic schema validation against live_config.json — catches typos and invariant violations."""
+
+    CONFIG_PATH = REPO_ROOT / "config" / "live_config.json"
+    SCHEMA_PATH = REPO_ROOT / "config" / "live_config_schema.py"
+
+    def _load(self) -> dict:
+        import json
+        return json.loads(self.CONFIG_PATH.read_text())
+
+    def _validate(self, cfg: dict):
+        sys.path.insert(0, str(REPO_ROOT))
+        from config.live_config_schema import LiveConfig
+        return LiveConfig.model_validate(cfg)
+
+    def test_live_config_passes_schema(self):
+        """live_config.json must pass full Pydantic schema validation."""
+        cfg = self._load()
+        self._validate(cfg)  # raises on failure
+
+    def test_simulator_trade_route_rejected(self):
+        """Schema must reject trade_route='simulator'."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["trade_route"] = "simulator"
+        with self.assertRaises(ValidationError, msg="Schema must reject trade_route='simulator'"):
+            self._validate(cfg)
+
+    def test_max_daily_trades_mismatch_rejected(self):
+        """Schema must reject flat max_daily_trades != prop_firm.max_daily_trades."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["max_daily_trades"] = cfg["prop_firm"]["max_daily_trades"] + 2
+        with self.assertRaises(ValidationError, msg="Schema must reject max_daily_trades mismatch"):
+            self._validate(cfg)
+
+    def test_sl_points_ticks_mismatch_rejected(self):
+        """Schema must reject sl_points/orb.stop_loss_ticks inconsistency (BUG-8 class)."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["orb"] = dict(cfg["orb"])
+        cfg["orb"]["stop_loss_ticks"] = 16  # was 60 before BUG-8 fix
+        with self.assertRaises(ValidationError, msg="Schema must reject sl_points/ticks mismatch"):
+            self._validate(cfg)
+
+    def test_wrong_point_value_rejected(self):
+        """Schema must reject point_value=20.0 (NQ) at both root and orb section."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["point_value"] = 20.0
+        with self.assertRaises(ValidationError, msg="Schema must reject point_value=20.0"):
+            self._validate(cfg)
+
+    def test_negative_daily_loss_limit_required(self):
+        """Schema must reject positive flat daily_loss_limit (C++ requires negative threshold)."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["daily_loss_limit"] = 2000.0  # positive — wrong for C++ flat key
+        with self.assertRaises(ValidationError, msg="Schema must reject positive daily_loss_limit"):
+            self._validate(cfg)
+
+    def test_typo_key_detected(self):
+        """Schema must reject config when a required key is missing due to a typo."""
+        from pydantic import ValidationError
+        cfg = self._load()
+        cfg["trale_route"] = cfg.pop("trade_route")  # typo
+        with self.assertRaises(ValidationError, msg="Schema must reject missing trade_route"):
+            self._validate(cfg)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

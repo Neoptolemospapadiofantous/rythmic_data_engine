@@ -777,7 +777,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                                                    notif.fill_size(),
                                                    is_entry && !is_stop);
                     flush_position(db.get(), today, order_mgr, strategy,
-                                   order_plant->connected, cfg.point_value);
+                                   order_plant->connected, orb_cfg.point_value);
                 } else if (notify_type == 2) { // MODIFY ACK
                     LOG("[EXECUTOR] Stop MODIFIED by exchange: client=%s server=%s — trail ACKed",
                         notif.user_tag().c_str(), notif.basket_id().c_str());
@@ -900,7 +900,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 }
                 // Immediate position flush after trade close so UI sees FLAT right away
                 flush_position(db.get(), today, order_mgr, strategy,
-                               order_plant->connected);
+                               order_plant->connected, orb_cfg.point_value);
                 pos_write_counter = 0;
             }
 
@@ -908,7 +908,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             if (++pos_write_counter >= 5) {
                 pos_write_counter = 0;
                 flush_position(db.get(), today, order_mgr, strategy,
-                               order_plant->connected);
+                               order_plant->connected, orb_cfg.point_value);
             }
         }
     };
