@@ -316,6 +316,42 @@ struct OrderPlant {
         }
     }
 
+    // Send RequestModifyOrder (template 314) — atomically changes stop trigger_price.
+    // Returns true if sent successfully.
+    bool send_modify_order(const std::string& basket_id,
+                           double new_trigger_price,
+                           const std::string& symbol,
+                           const std::string& exchange_str,
+                           bool dry_run) {
+        if (dry_run) {
+            LOG("[ORDER_PLANT] [DRY_RUN] Would modify stop basket=%s trigger=%.2f",
+                basket_id.c_str(), new_trigger_price);
+            return true;
+        }
+        if (!connected || !ws) {
+            LOG("[ORDER_PLANT] Not connected — cannot modify order basket=%s", basket_id.c_str());
+            return false;
+        }
+        rti::RequestModifyOrder req;
+        req.set_template_id(314);
+        req.set_basket_id(basket_id);
+        req.set_fcm_id(fcm_id);
+        req.set_ib_id(ib_id);
+        req.set_account_id(account_id);
+        req.set_symbol(symbol);
+        req.set_exchange(exchange_str);
+        req.set_trigger_price(new_trigger_price);
+        try {
+            ws->write(asio::buffer(proto_frame(req)));
+            LOG("[ORDER_PLANT] RequestModifyOrder sent: basket=%s new_trigger=%.2f",
+                basket_id.c_str(), new_trigger_price);
+            return true;
+        } catch (std::exception& e) {
+            LOG("[ORDER_PLANT] ERROR sending modify order: %s", e.what());
+            return false;
+        }
+    }
+
     // Send RequestCancelOrder (template 316)
     void send_cancel(const std::string& basket_id, const std::string& account_id_str) {
         if (!connected || !ws) return;
@@ -406,6 +442,14 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
     order_mgr.set_cancel_callback(
         [&order_plant](const std::string& basket_id) {
             order_plant->send_cancel(basket_id, order_plant->account_id);
+        }
+    );
+    order_mgr.set_modify_callback(
+        [&order_plant, &orb_cfg](const std::string& basket_id, double new_trigger) -> bool {
+            const std::string& sym = order_plant->trade_symbol.empty()
+                                   ? orb_cfg.symbol : order_plant->trade_symbol;
+            return order_plant->send_modify_order(
+                basket_id, new_trigger, sym, orb_cfg.exchange, orb_cfg.dry_run);
         }
     );
 
@@ -613,21 +657,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 }
             }
 
-            // PnL subscription disabled — not supported on Legends simulator route
-            if (false) {
-                rti::RequestPnLPositionUpdates pnl_sub;
-                pnl_sub.set_template_id(400);
-                pnl_sub.set_request(rti::RequestPnLPositionUpdates::SUBSCRIBE);
-                pnl_sub.set_fcm_id(orb_cfg.fcm_id);
-                pnl_sub.set_ib_id(orb_cfg.ib_id);
-                pnl_sub.set_account_id(orb_cfg.account_id);
-                try {
-                    order_plant->ws->write(asio::buffer(proto_frame(pnl_sub)));
-                    LOG("[EXECUTOR] Sent RequestPnLPositionUpdates SUBSCRIBE (tid=400)");
-                } catch (std::exception& e) {
-                    LOG("[EXECUTOR] WARNING: Failed to send PnL subscription: %s", e.what());
-                }
-            }
+
         } catch (std::exception& e) {
             LOG("[EXECUTOR] FATAL: ORDER_PLANT connect failed: %s", e.what());
             co_return;
@@ -735,6 +765,9 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                                                    is_entry && !is_stop);
                     flush_position(db.get(), today, order_mgr, strategy,
                                    order_plant->connected);
+                } else if (notify_type == 2) { // MODIFY ACK
+                    LOG("[EXECUTOR] Stop MODIFIED by exchange: client=%s server=%s — trail ACKed",
+                        notif.user_tag().c_str(), notif.basket_id().c_str());
                 } else if (notify_type == 6) { // REJECT
                     LOG("[EXECUTOR] Order REJECTED by exchange: client=%s server=%s status=%s",
                         notif.user_tag().c_str(), notif.basket_id().c_str(), notif.status().c_str());
@@ -745,40 +778,6 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     order_mgr.on_cancel_confirmed(notif.user_tag());
                 }
 
-            } else if (tid == 401) {
-                // ResponsePnLPositionUpdates — subscription ack
-                rti::ResponsePnLPositionUpdates resp;
-                resp.ParseFromString(payload);
-                std::string rpc = resp.rp_code().empty() ? "?" : resp.rp_code(0);
-                LOG("[EXECUTOR] PnL subscription %s (rp_code=%s)",
-                    rpc == "0" ? "OK" : "FAILED", rpc.c_str());
-
-            } else if (tid == 451) {
-                // AccountPnLPositionUpdate — periodic account balance/equity updates.
-                // account_balance is a string field in this proto; parse it to double.
-                rti::AccountPnLPositionUpdate upd;
-                if (!upd.ParseFromString(payload)) continue;
-                // account_balance field is proto string (Rithmic sends it as formatted decimal)
-                const std::string& bal_str = upd.account_balance();
-                if (!bal_str.empty()) {
-                    try {
-                        double equity = std::stod(bal_str);
-                        LOG("[EXECUTOR] AccountPnLPositionUpdate account_balance=$%.2f "
-                            "day_pnl=%s margin=%s",
-                            equity, upd.day_pnl().c_str(), upd.margin_balance().c_str());
-                        risk.set_equity(equity);  // keep trailing DD anchored to real balance
-                        if (db && db->is_connected()) {
-                            try {
-                                db->write_account_equity(today, equity);
-                            } catch (std::exception& e) {
-                                LOG("[EXECUTOR] write_account_equity failed: %s", e.what());
-                            }
-                        }
-                    } catch (...) {
-                        LOG("[EXECUTOR] AccountPnLPositionUpdate: could not parse "
-                            "account_balance='%s'", bal_str.c_str());
-                    }
-                }
             }
         }
     };

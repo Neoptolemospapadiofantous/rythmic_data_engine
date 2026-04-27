@@ -73,6 +73,12 @@ using OrderSendCallback = std::function<bool(
     const std::string& user_tag
 )>;
 using OrderCancelCallback = std::function<void(const std::string& basket_id)>;
+// Atomically changes the trigger_price of an existing STOP_MARKET order.
+// Returns true if the modify was sent successfully.
+using OrderModifyCallback = std::function<bool(
+    const std::string& basket_id,
+    double new_trigger_price
+)>;
 
 // ─── OrderManager ─────────────────────────────────────────────────────────────
 class OrderManager {
@@ -85,6 +91,7 @@ public:
 
     void set_order_callback(OrderSendCallback cb)   { order_cb_  = std::move(cb); }
     void set_cancel_callback(OrderCancelCallback cb) { cancel_cb_ = std::move(cb); }
+    void set_modify_callback(OrderModifyCallback cb) { modify_cb_ = std::move(cb); }
 
     // ── Called by OrbStrategy signal callback ─────────────────────────────────
     void on_signal(OrbSignal sig, double price, const std::string& reason) {
@@ -225,9 +232,6 @@ public:
             risk_.on_trade_pnl(pos_.pnl_usd);
 
             pos_ = Position{};  // back to FLAT
-            // Clear any pending trail stop state so it doesn't fire after we're flat
-            pending_new_stop_price_ = 0.0;
-            last_stop_basket_.clear();
             trade_completed_ = true;
         }
     }
@@ -249,8 +253,7 @@ public:
         if (mae_now > pos_.mae) pos_.mae = mae_now;
 
         // Software SL only fires if no exchange stop is active (fallback for rejected stops).
-        // Suppressed while a trail cancel is in-flight (exchange stop still live until ACK).
-        if (pos_.basket_id_stop.empty() && !pending_trail_cancel_) {
+        if (pos_.basket_id_stop.empty()) {
             if (is_long && current_price <= pos_.sl_price) {
                 LOG("[OM] Software SL hit (LONG, no exchange stop): price=%.2f sl=%.2f",
                     current_price, pos_.sl_price);
@@ -340,20 +343,10 @@ public:
         }
     }
 
-    // ── Cancel confirmed by exchange — submit queued trail stop if position still open ──
+    // ── Cancel ACK — stop was cancelled (position exit path only with modify-order trail) ──
     void on_cancel_confirmed(const std::string& basket_id) {
         std::lock_guard<std::mutex> lk(state_mu_);
-        if (basket_id != last_stop_basket_ || pending_new_stop_price_ == 0.0) return;
-        double new_sl = pending_new_stop_price_;
-        pending_new_stop_price_ = 0.0;
-        last_stop_basket_.clear();
-        pending_trail_cancel_ = false;
-        if (pos_.state != PosState::LONG && pos_.state != PosState::SHORT) {
-            LOG("[OM] Cancel ACK %s — position closed, discarding queued stop", basket_id.c_str());
-            return;
-        }
-        LOG("[OM] Cancel ACK %s — submitting queued stop at %.2f", basket_id.c_str(), new_sl);
-        submit_stop_order_locked(new_sl);
+        LOG("[OM] Cancel ACK basket=%s (stop removed at position close)", basket_id.c_str());
     }
 
     // ── Read-only position snapshot for DB / UI writes ────────────────────────
@@ -402,6 +395,7 @@ private:
     LatencyLogger& lat_;
     OrderSendCallback   order_cb_;
     OrderCancelCallback cancel_cb_;
+    OrderModifyCallback modify_cb_;
 
     mutable std::mutex state_mu_;
     Position           pos_;
@@ -410,11 +404,6 @@ private:
 
     TradeLatency last_entry_lat_;
     TradeLatency last_exit_lat_;
-
-    // Trail stop cancel-then-resubmit state
-    std::string last_stop_basket_;          // basket being cancelled for trail update
-    double      pending_new_stop_price_ = 0.0; // queued new stop price, submitted on cancel ACK
-    bool        pending_trail_cancel_   = false; // cancel in-flight; suppress software SL until ACK
 
     // Stale stop unwind state (fires when old stop fills after position already closed)
     std::string last_stop_for_unwind_;      // basket of stop sent to cancel at position close
@@ -480,24 +469,37 @@ private:
         }
     }
 
-    // Cancel existing stop and submit new one at new_sl (called while state_mu_ held)
-    // Cancel-first to avoid CME rejecting the new stop while the old one is live.
-    // New stop is submitted in on_cancel_confirmed() when the exchange ACKs the cancel.
+    // Modify existing stop in-place to new_sl (called while state_mu_ held).
+    // Uses RequestModifyOrder (atomic trigger_price change at exchange) to eliminate
+    // the cancel-gap window that existed with the old cancel+resubmit approach.
+    // Falls back to cancel+resubmit only if no modify callback is wired.
     void update_stop_order_locked(double /*old_sl*/, double new_sl) {
         if (cfg_.dry_run) {
-            // In dry-run, simulate immediately
+            LOG("[OM] [DRY_RUN] Trail: would modify stop to %.2f", new_sl);
+            return;
+        }
+        if (pos_.basket_id_stop.empty()) {
+            // No live exchange stop — submit a fresh one
             submit_stop_order_locked(new_sl);
             return;
         }
-        if (!cancel_cb_) return;
-        last_stop_basket_        = pos_.basket_id_stop;
-        pending_new_stop_price_  = new_sl;
-        if (!pos_.basket_id_stop.empty()) {
-            LOG("[OM] Trail update: cancelling stop %s, new_sl=%.2f (submit after cancel ACK)",
+        if (modify_cb_) {
+            LOG("[OM] Trail update: modifying stop %s trigger=%.2f",
                 pos_.basket_id_stop.c_str(), new_sl);
-            cancel_cb_(pos_.basket_id_stop);
-            pos_.basket_id_stop.clear();  // exchange stop still live; cancel in-flight
-            pending_trail_cancel_ = true; // suppress software SL until cancel ACK
+            bool ok = modify_cb_(pos_.basket_id_stop, new_sl);
+            if (!ok) {
+                // Modify rejected — fall back to cancel+immediate resubmit.
+                // Software SL stays active (basket_id_stop not cleared until cancel ACK
+                // would have arrived anyway, but here we clear it and resubmit now).
+                LOG("[OM] Modify failed — cancel+resubmit fallback at %.2f", new_sl);
+                cancel_stop_locked();
+                submit_stop_order_locked(new_sl);
+            }
+        } else {
+            // No modify callback configured (shouldn't happen in live mode)
+            LOG("[OM] WARN: no modify callback — cancel+resubmit stop at %.2f", new_sl);
+            cancel_stop_locked();
+            submit_stop_order_locked(new_sl);
         }
     }
 
@@ -516,17 +518,6 @@ private:
         if (pos_.state != PosState::LONG && pos_.state != PosState::SHORT) return;
 
         // Cancel the exchange stop BEFORE submitting market exit to prevent double-fill.
-        // If a trail cancel is in-flight (stop basket already cleared), track the pending
-        // cancel basket for stale-fill detection and clear the trail cancel flag.
-        if (pending_trail_cancel_ && !last_stop_basket_.empty()) {
-            last_stop_for_unwind_ = last_stop_basket_;
-            last_stop_was_buy_    = (pos_.direction == OrbSignal::SELL);
-            LOG("[OM] Exit while trail cancel in-flight: tracking dangling stop %s",
-                last_stop_basket_.c_str());
-            last_stop_basket_.clear();
-            pending_new_stop_price_ = 0.0;
-            pending_trail_cancel_   = false;
-        }
         cancel_stop_locked();
 
         pos_.state       = PosState::PENDING_EXIT;

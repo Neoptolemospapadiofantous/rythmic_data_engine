@@ -222,6 +222,22 @@ message ResponseNewOrder {
   string account_id = 154008;
 }
 
+// ── Template 314 — Modify Order ───────────────────────────────────
+// Used for trailing stop updates: atomically changes trigger_price on an
+// existing STOP_MARKET order without a cancel-gap.
+message RequestModifyOrder {
+  int32  template_id    = 154467;
+  string basket_id      = 110300;
+  string fcm_id         = 154013;
+  string ib_id          = 154014;
+  string account_id     = 154008;
+  string symbol         = 110100;
+  string exchange       = 110101;
+  int32  quantity       = 112004;
+  double trigger_price  = 149247;
+  double price          = 110306;
+}
+
 // ── Template 316 — Cancel Order ───────────────────────────────────
 message RequestCancelOrder {
   int32 template_id = 154467;
