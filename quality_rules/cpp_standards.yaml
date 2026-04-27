@@ -8,14 +8,7 @@ rules:
     check: "manual_review"
     description: "All monetary constants must be configurable via OrbConfig — not hardcoded in logic"
     scope: "src/**/*.cpp,src/**/*.hpp"
-    known_violations:
-      - id: CPP-BUG-001
-        file: "src/execution/orb_config.hpp"
-        constant: "NQ_TICK_VALUE"
-        current_value: 5.0
-        correct_value: 0.50
-        impact: "Latency logger slippage_usd is 10x inflated"
-        fix: "Remove or rename to MNQ_TICK_VALUE=0.50, or derive from cfg_.point_value * NQ_TICK_SIZE"
+    note: "FIXED 2026-04-28: MNQ_TICK_VALUE=0.50 added; latency_logger now uses MNQ_TICK_VALUE"
     message: "Monetary constants must use cfg_.point_value from OrbConfig, not hardcoded NQ_TICK_VALUE"
 
   - id: CPP-002
@@ -32,10 +25,7 @@ rules:
     check: "manual_review"
     description: "OrbConfig struct defaults must not hardcode 'NQ' when trading MNQ"
     scope: "src/execution/orb_config.hpp"
-    note: "Defaults should be 'MNQ' or clearly documented as requiring config override"
-    known_violations:
-      - file: "src/execution/orb_config.hpp"
-        detail: "symbol default may be 'NQ' — must be overridden by orb_config.json"
+    note: "VERIFIED 2026-04-28: OrbConfig::symbol default='MNQ' (confirmed via grep). Config also overrides at runtime."
 
   - id: CPP-004
     name: comments_match_contract
