@@ -705,9 +705,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     rpc == "0" ? "OK" : "FAILED", rpc.c_str());
 
             } else if (tid == 313 || tid == 315) {
-                // ResponseNewOrder — two responses per order: first has rq_handler_rp_code only,
-                // second has rp_code. Only the second "rp_code" tells us accept/reject.
-                // Empty rp_code = preliminary ack, ignore.
+                // 313 = preliminary gateway ack (rq_handler_rp_code only)
+                // 315 = final response for both RequestNewOrder and RequestModifyOrder
                 rti::ResponseNewOrder resp;
                 resp.ParseFromString(payload);
                 if (resp.rp_code().empty()) {
@@ -715,13 +714,21 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         resp.basket_id().c_str());
                 } else {
                     std::string rpc = resp.rp_code(0);
-                    LOG("[EXECUTOR] ResponseNewOrder basket=%s rp_code=%s",
-                        resp.basket_id().c_str(), rpc.c_str());
-                    if (rpc != "0") {
-                        LOG("[EXECUTOR] Order REJECTED at gateway: basket=%s code=%s",
+                    // If a modify is in-flight, treat tid=315 as the modify response
+                    if (tid == 315 && order_mgr.has_pending_modify()) {
+                        bool accepted = (rpc == "0");
+                        LOG("[EXECUTOR] ResponseModifyOrder rp_code=%s (%s)",
+                            rpc.c_str(), accepted ? "ACK" : "REJECT");
+                        order_mgr.on_modify_response(accepted, rpc);
+                    } else {
+                        LOG("[EXECUTOR] ResponseNewOrder basket=%s rp_code=%s",
                             resp.basket_id().c_str(), rpc.c_str());
-                        order_mgr.on_order_rejected(resp.basket_id(),
-                                                    "gateway_reject_" + rpc);
+                        if (rpc != "0") {
+                            LOG("[EXECUTOR] Order REJECTED at gateway: basket=%s code=%s",
+                                resp.basket_id().c_str(), rpc.c_str());
+                            order_mgr.on_order_rejected(resp.basket_id(),
+                                                        "gateway_reject_" + rpc);
+                        }
                     }
                 }
 
@@ -732,6 +739,11 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 if (!notif.ParseFromString(payload)) continue;
                 LOG("[EXECUTOR] RithmicOrderNotification basket=%s notify_type=%d status=%s",
                     notif.basket_id().c_str(), (int)notif.notify_type(), notif.status().c_str());
+                // When our stop order reaches the exchange, capture the server basket_id.
+                // RequestModifyOrder must use this ID, not our client user_tag.
+                if (order_mgr.is_stop_basket(notif.user_tag()) && !notif.basket_id().empty()) {
+                    order_mgr.set_stop_server_basket(notif.basket_id());
+                }
 
             } else if (tid == 352) {
                 // ExchangeOrderNotification — actual exchange fills, rejects, and cancels.

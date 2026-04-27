@@ -349,6 +349,39 @@ public:
         LOG("[OM] Cancel ACK basket=%s (stop removed at position close)", basket_id.c_str());
     }
 
+    // ── Server basket_id for stop order (from tid=351 notifications) ─────────
+    // The exchange assigns its own basket_id; RequestModifyOrder needs it, not our user_tag.
+    void set_stop_server_basket(const std::string& server_basket_id) {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        stop_server_basket_ = server_basket_id;
+        LOG("[OM] Stop server basket_id mapped: client=%s server=%s",
+            pos_.basket_id_stop.c_str(), server_basket_id.c_str());
+    }
+
+    // ── Modify response from exchange — if rejected, fall back to cancel+resubmit ──
+    void on_modify_response(bool accepted, const std::string& rp_code) {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        if (!pending_modify_) return;
+        pending_modify_ = false;
+        if (accepted) {
+            LOG("[OM] Stop modify ACKed by exchange (new_sl=%.2f)", pending_modify_new_sl_);
+            pending_modify_new_sl_ = 0.0;
+        } else {
+            double new_sl = pending_modify_new_sl_;
+            pending_modify_new_sl_ = 0.0;
+            LOG("[OM] Stop modify REJECTED (rp_code=%s) — cancel+resubmit at %.2f",
+                rp_code.c_str(), new_sl);
+            if (pos_.state != PosState::LONG && pos_.state != PosState::SHORT) return;
+            cancel_stop_locked();
+            submit_stop_order_locked(new_sl);
+        }
+    }
+
+    bool has_pending_modify() const {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        return pending_modify_;
+    }
+
     // ── Read-only position snapshot for DB / UI writes ────────────────────────
     // Returns a copy of the current Position so the caller can build a
     // write_position() call without holding the mutex during DB I/O.
@@ -405,6 +438,12 @@ private:
     TradeLatency last_entry_lat_;
     TradeLatency last_exit_lat_;
 
+    // Server-assigned basket_id for the current stop order (needed for RequestModifyOrder)
+    std::string stop_server_basket_;
+    // Pending modify state: tracks an in-flight modify so rejection triggers fallback
+    bool        pending_modify_      = false;
+    double      pending_modify_new_sl_ = 0.0;
+
     // Stale stop unwind state (fires when old stop fills after position already closed)
     std::string last_stop_for_unwind_;      // basket of stop sent to cancel at position close
     bool        last_stop_was_buy_ = false; // true = stop was a BUY (SHORT position)
@@ -456,6 +495,8 @@ private:
         bool stop_is_sell = is_long;
         std::string basket = new_basket_id();
         pos_.basket_id_stop = basket;
+        stop_server_basket_.clear();   // new stop — server basket_id not yet known
+        pending_modify_      = false;  // clear any stale pending modify
         LOG("[OM] Submitting exchange STOP_MARKET %s at %.2f basket=%s",
             stop_is_sell ? "SELL" : "BUY", sl_price, basket.c_str());
         // Pre-populate latency record so exchange-stop fills get meaningful metrics
@@ -484,14 +525,19 @@ private:
             return;
         }
         if (modify_cb_) {
-            LOG("[OM] Trail update: modifying stop %s trigger=%.2f",
-                pos_.basket_id_stop.c_str(), new_sl);
-            bool ok = modify_cb_(pos_.basket_id_stop, new_sl);
-            if (!ok) {
-                // Modify rejected — fall back to cancel+immediate resubmit.
-                // Software SL stays active (basket_id_stop not cleared until cancel ACK
-                // would have arrived anyway, but here we clear it and resubmit now).
-                LOG("[OM] Modify failed — cancel+resubmit fallback at %.2f", new_sl);
+            // Prefer server-assigned basket_id for modify (user_tag rejected by some gateways)
+            const std::string& mod_basket = stop_server_basket_.empty()
+                ? pos_.basket_id_stop : stop_server_basket_;
+            LOG("[OM] Trail update: modifying stop %s (server=%s) trigger=%.2f",
+                pos_.basket_id_stop.c_str(), mod_basket.c_str(), new_sl);
+            bool ok = modify_cb_(mod_basket, new_sl);
+            if (ok) {
+                // Modify message sent — wait for exchange response via on_modify_response()
+                pending_modify_     = true;
+                pending_modify_new_sl_ = new_sl;
+            } else {
+                // Send failed — fall back to cancel+immediate resubmit
+                LOG("[OM] Modify send failed — cancel+resubmit at %.2f", new_sl);
                 cancel_stop_locked();
                 submit_stop_order_locked(new_sl);
             }
@@ -512,6 +558,9 @@ private:
         LOG("[OM] Cancelling stop basket=%s (position closed)", pos_.basket_id_stop.c_str());
         cancel_cb_(pos_.basket_id_stop);
         pos_.basket_id_stop.clear();
+        stop_server_basket_.clear();
+        pending_modify_      = false;
+        pending_modify_new_sl_ = 0.0;
     }
 
     void initiate_exit_locked(const std::string& reason, double ref_price) {

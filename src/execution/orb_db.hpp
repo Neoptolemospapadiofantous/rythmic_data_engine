@@ -57,7 +57,7 @@ public:
         // to avoid recording 1970-01-01 as the exit timestamp.
         std::string exit_time_sql = (exit_lat.fill_ts_ns > 0)
             ? ("to_timestamp(" + std::to_string(exit_lat.fill_ts_ns / 1000)
-               + "::bigint / 1000000.0) AT TIME ZONE 'UTC'")
+               + "::bigint / 1000000.0)")
             : "NOW()";
 
         char sql[2048];
@@ -69,7 +69,7 @@ public:
             " mae_pts, mfe_pts, trigger_price, fill_price) "
             "VALUES "
             "('%s', '%s', "
-            " to_timestamp(%lld::bigint / 1000000.0) AT TIME ZONE 'UTC', "
+            " to_timestamp(%lld::bigint / 1000000.0),"
             " %s, "
             " %.4f, %.4f, %.4f, %d, %.4f, %.4f, '%s', "
             " %lld, %lld, %d, %d, "

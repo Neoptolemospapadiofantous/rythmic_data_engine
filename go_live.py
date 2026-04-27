@@ -10,7 +10,7 @@ Usage
 
 Gates (all must pass before promotion)
 ---------------------------------------
-A. NO_DEPLOY lockfile not present
+A. NO_DEPLOY lockfile not2 present
 B. Config loaded successfully
 C. dry_run is currently True (must be in paper mode before promoting)
 D. PostgreSQL connection succeeds
