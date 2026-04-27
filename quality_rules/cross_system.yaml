@@ -2,6 +2,54 @@ version: 1
 description: "Cross-system contracts between C++ rithmic_engine and Python live_trader for MNQ ORB trading"
 
 known_bugs:
+  - id: BUG-7
+    severity: P0
+    name: daily_loss_limit_key_mismatch
+    description: "C++ reads flat 'daily_loss_limit' key; live_config.json only had it nested under prop_firm — C++ always used -1000.0 default"
+    source_file: "src/execution/orb_config.hpp"
+    source_line: "c.daily_loss_limit = json_dbl(text, \"daily_loss_limit\", -1000.0);"
+    config_file: "config/live_config.json"
+    impact: "C++ executor halted trading $1000 too early every session — actual Legends limit is $2000"
+    fix_applied: "Added flat key 'daily_loss_limit': -2000.0 to live_config.json (negative = threshold). prop_firm.daily_loss_limit: 2000.0 kept for go_live.py gate I (Python reads positive magnitude)."
+    status: FIXED
+
+  - id: BUG-8
+    severity: P0
+    name: stop_loss_ticks_cpp_python_mismatch
+    description: "C++ sl_points=15.0 (60 ticks) vs Python stop_loss_ticks=16 (4.0 points) — 3.75x mismatch in stop-loss distance"
+    cpp:
+      source: "src/execution/orb_config.hpp"
+      key: "sl_points"
+      value: 15.0
+      ticks_equivalent: 60
+      risk_per_trade_usd: 30.0  # 15 points * $2/point
+    python:
+      source: "config/live_config.json → orb.stop_loss_ticks"
+      old_value: 16
+      old_points: 4.0
+      old_risk_per_trade_usd: 8.0  # 4 points * $2/point
+      new_value: 60
+      new_points: 15.0
+      new_risk_per_trade_usd: 30.0  # aligned with C++
+    fix_applied: "Changed live_config.json orb.stop_loss_ticks from 16 to 60 (= sl_points 15.0 / tick_size 0.25)"
+    status: FIXED
+
+  - id: BUG-9
+    severity: INFO
+    name: exit_target_cpp_python_architectural_difference
+    description: "C++ executor has no fixed target exit — uses trailing stop only. Python MicroORBStrategy exits at target_ticks=48 (12 points). This is an intentional architectural difference."
+    cpp:
+      source: "src/execution/orb_strategy.cpp"
+      behavior: "No fixed target — relies on trailing stop (trail_step=10.0 points) to capture profits"
+    python:
+      source: "config/live_config.json → orb.target_ticks"
+      value: 48
+      points_equivalent: 12.0
+      behavior: "Exits when price reaches entry + 12 points (long) or entry - 12 points (short)"
+    impact: "Python may exit at 12-point profit while C++ continues trailing. On same signal, outcomes can diverge significantly."
+    resolution: "INTENTIONAL — document and monitor. C++ trailing approach is preferred for live execution; Python target is a safety valve in paper trading mode."
+    status: DOCUMENTED
+
   - id: CPP-BUG-001
     severity: HIGH
     name: nq_tick_value_wrong_for_mnq
@@ -29,7 +77,7 @@ known_bugs:
     source_line: "\"point_value\": 20.0"
     impact: "Developers reading code will hardcode wrong value; default fallback is wrong"
     fix: "Change point_value default/example to 2.0 throughout"
-    status: OPEN
+    status: FIXED  # 2026-04-28: docstring updated to 2.0 in T4
 
   - id: PY-BUG-002
     severity: HIGH
@@ -39,7 +87,7 @@ known_bugs:
     source_line: "self._point_value: float = float(config[\"orb\"].get(\"point_value\", 20.0))"
     impact: "If point_value missing from config, all PnL calculations are 10x wrong"
     fix: "Change default from 20.0 to 2.0"
-    status: OPEN
+    status: FIXED  # 2026-04-28: default changed to 2.0 in T4
 
 contracts:
   - id: XSYS-001
@@ -51,10 +99,10 @@ contracts:
       expected_default: 2.0
     python:
       source: "live_trader.py"
-      expression: "config['orb'].get('point_value', 20.0)"
-      current_default: 20.0   # BUG PY-BUG-002 — wrong, must be 2.0
+      expression: "config['orb'].get('point_value', 2.0)"
+      current_default: 2.0
       expected_default: 2.0
-    status: MISMATCH  # BUG — Python default is wrong
+    status: OK  # FIXED 2026-04-28 in T4
 
   - id: XSYS-002
     name: tick_value_agreement
@@ -111,9 +159,9 @@ contracts:
       default: 2.0
     python:
       source: "live_trader.py"
-      read_via: "config['orb'].get('point_value', 20.0)"
+      read_via: "config['orb'].get('point_value', 2.0)"
       json_path: "config/live_config.json → orb section"
-      default: 20.0  # BUG — should be 2.0
+      default: 2.0  # FIXED 2026-04-28
 
   - id: XSYS-006
     name: commission_agreement

@@ -11,6 +11,7 @@
   "ib_id": "LegendsTrading",
 
   "_cpp_executor_params": "flat fields below are read by C++ parser (not nested sections)",
+  "daily_loss_limit": -2000.0,
   "orb_minutes": 5,
   "sl_points": 15.0,
   "trail_step": 10.0,
@@ -34,7 +35,7 @@
   },
   "orb": {
     "orb_period_minutes": 5,
-    "stop_loss_ticks": 16,
+    "stop_loss_ticks": 60,
     "target_ticks": 48,
     "tick_size": 0.25,
     "point_value": 2.0,
