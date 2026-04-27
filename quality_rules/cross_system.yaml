@@ -57,8 +57,8 @@ known_bugs:
     source_file: "src/execution/orb_config.hpp"
     source_line: "inline constexpr double NQ_TICK_VALUE = 5.0;"
     impact: "10x inflated slippage_usd in latency logger — $5.00 reported per tick instead of $0.50"
-    fix: "Replace NQ_TICK_VALUE with configurable MNQ_TICK_VALUE = POINT_VALUE * NQ_TICK_SIZE = 2.0 * 0.25 = 0.50"
-    status: OPEN
+    fix: "Added MNQ_TICK_VALUE = 0.50 constant; latency_logger.hpp updated to use MNQ_TICK_VALUE"
+    status: FIXED  # 2026-04-28
 
   - id: CPP-BUG-002
     severity: LOW
@@ -66,8 +66,38 @@ known_bugs:
     description: "executor_main.cpp comment says 'NQ: $20/point' — wrong for MNQ ($2/point)"
     source_file: "src/execution/executor_main.cpp"
     impact: "Documentation only — misleads developers about contract spec"
-    fix: "Update comment to 'MNQ: $2/point'"
-    status: OPEN
+    fix: "Updated comment and flush_position() to use point_value parameter instead of hardcoded 20.0"
+    status: FIXED  # 2026-04-28
+
+  - id: BUG-14
+    severity: P0
+    name: trade_route_simulator_in_live_config
+    description: "live_config.json had trade_route='simulator' — C++ executor passes this to Rithmic set_trade_route(); simulator routes all orders to Rithmic paper system even with dry_run=False"
+    source_file: "config/live_config.json"
+    cpp_reader: "src/execution/orb_config.hpp line 196: c.trade_route = json_str(text, 'trade_route', ...)"
+    impact: "SILENT PAPER TRADING IN LIVE MODE — orders appear to submit but go to simulator; no real fills possible"
+    fix: "Changed trade_route from 'simulator' to 'Rithmic Order Routing' in live_config.json"
+    status: FIXED  # 2026-04-28
+
+  - id: BUG-15
+    severity: P1
+    name: risk_params_flat_keys_missing
+    description: "trailing_drawdown_cap and consistency_cap_pct were missing as flat keys — C++ risk_manager.hpp uses orb_config.hpp defaults (2500.0 and 0.30) without any config binding"
+    cpp_reader: "src/execution/orb_config.hpp lines 184-185"
+    config_file: "config/live_config.json"
+    impact: "Risk parameters silently invisible in config — any prop firm rule change would not propagate to C++ executor"
+    fix: "Added flat keys trailing_drawdown_cap=2500.0 and consistency_cap_pct=0.30 to live_config.json"
+    status: FIXED  # 2026-04-28
+
+  - id: BUG-16
+    severity: P1
+    name: max_daily_trades_flat_exceeds_prop_firm
+    description: "Flat max_daily_trades=5 (C++ reads) exceeded prop_firm.max_daily_trades=3 (Legends limit) — C++ would allow 4th and 5th trade, violating prop firm consistency rules"
+    cpp_reader: "src/execution/orb_config.hpp line 177"
+    config_file: "config/live_config.json"
+    impact: "C++ executor could take trades 4+5 in a session, breaching Legends 50K rules and risking account termination"
+    fix: "Changed flat max_daily_trades from 5 to 3 to match prop_firm.max_daily_trades"
+    status: FIXED  # 2026-04-28
 
   - id: PY-BUG-001
     severity: HIGH
@@ -106,17 +136,17 @@ contracts:
 
   - id: XSYS-002
     name: tick_value_agreement
-    description: "C++ NQ_TICK_VALUE and Python TICK_VALUE must agree on MNQ tick value = 0.50"
+    description: "C++ MNQ_TICK_VALUE and Python TICK_VALUE must agree on MNQ tick value = 0.50"
     cpp:
       source: "src/execution/orb_config.hpp"
-      constant: "NQ_TICK_VALUE"
-      current_value: 5.0    # BUG CPP-BUG-001 — NQ value, not MNQ
+      constant: "MNQ_TICK_VALUE"
+      current_value: 0.50
       expected_value: 0.50
     python:
       source: "live_trader.py"
       derivation: "point_value * 0.25"
       expected_value: 0.50  # correct when point_value=2.0 from config
-    status: MISMATCH  # BUG — C++ constant is wrong
+    status: OK  # FIXED 2026-04-28 — MNQ_TICK_VALUE constant added
 
   - id: XSYS-003
     name: symbol_agreement
@@ -124,16 +154,16 @@ contracts:
     cpp:
       source: "src/execution/orb_config.hpp"
       field: "OrbConfig::symbol"
-      note: "C++ reads symbol from config JSON; default may be 'NQ' — must be overridden by live_config.json"
+      default: "MNQ"  # FIXED 2026-04-28
     python:
       source: "live_trader.py"
       field: "self._symbol"
-      current_default: "NQ"  # line 316 — fallback is 'NQ'
-      live_config_value: "MNQ"  # config/live_config.json provides correct value
+      current_default: "MNQ"  # FIXED 2026-04-28
+      live_config_value: "MNQ"
     config_source: "config/live_config.json"
     config_key: "symbol"
     config_value: "MNQ"
-    status: CONFIG_DRIVEN  # both systems rely on config override; defaults are wrong
+    status: OK  # FIXED 2026-04-28
 
   - id: XSYS-004
     name: orb_minutes_agreement
@@ -192,9 +222,28 @@ contracts:
   - id: XSYS-008
     name: latency_logger_slippage_bug
     description: "Latency logger uses NQ_TICK_VALUE=5.0 to compute slippage_usd — produces 10x wrong values for MNQ"
-    source_file: "src/execution/orb_config.hpp"
+    source_file: "src/execution/latency_logger.hpp"
     impact: "All slippage_usd values in latency log are 10x inflated — misleads post-trade analysis"
     expected_per_tick: 0.50
-    current_per_tick: 5.0
-    error_factor: 10.0
-    status: OPEN  # blocked by CPP-BUG-001
+    current_per_tick: 0.50
+    error_factor: 1.0
+    status: FIXED  # 2026-04-28 — latency_logger.hpp now uses MNQ_TICK_VALUE
+
+  - id: XSYS-009
+    name: trade_route_not_simulator
+    description: "C++ executor reads trade_route from live_config.json and passes it directly to Rithmic; 'simulator' means paper orders regardless of dry_run setting"
+    cpp_reader: "src/execution/orb_config.hpp: c.trade_route = json_str(text, 'trade_route', ...)"
+    config_file: "config/live_config.json"
+    required_value: "Rithmic Order Routing"
+    forbidden_value: "simulator"
+    status: OK  # FIXED 2026-04-28 — BUG-14
+
+  - id: XSYS-010
+    name: risk_params_flat_match_prop_firm
+    description: "C++ reads trailing_drawdown_cap, consistency_cap_pct, max_daily_trades as flat keys; they must exist and match prop_firm nested values"
+    cpp_reader: "src/execution/orb_config.hpp lines 177, 184-185"
+    invariants:
+      - "flat trailing_drawdown_cap == prop_firm.trailing_drawdown_limit"
+      - "flat consistency_cap_pct == prop_firm.consistency_rule_pct"
+      - "flat max_daily_trades == prop_firm.max_daily_trades"
+    status: OK  # FIXED 2026-04-28 — BUG-15 + BUG-16

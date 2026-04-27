@@ -454,7 +454,7 @@ private:
         // Format: "NQ-<epoch_ms>-<seq>"
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        return "NQ-" + std::to_string(ms) + "-" + std::to_string(seq_.fetch_add(1));
+        return cfg_.symbol + "-" + std::to_string(ms) + "-" + std::to_string(seq_.fetch_add(1));
     }
 
     double compute_sl(double fill_price, OrbSignal dir) const {

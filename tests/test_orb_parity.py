@@ -13,7 +13,7 @@ Bar scenario (all times Eastern, 2024-03-15)
     Range low  = min(lows)  = 17490.0
   Bar 6 (09:35): close = 17520 > range high → LONG signal expected.
     Entry   = 17520.0
-    SL      = orb_high − stop_loss_ticks × tick_size = 17510 − 4.0 = 17506.0
+    SL      = orb_high − stop_loss_ticks × tick_size = 17510 − 15.0 = 17495.0
     Target  = entry + target_ticks × tick_size = 17520 + 12.0 = 17532.0
 """
 
@@ -41,12 +41,12 @@ _SESSION_DATE = date(2024, 3, 15)
 _RTH_OPEN_ET  = time(9, 30, tzinfo=ET)
 
 TICK_SIZE    = 0.25
-SL_TICKS     = 16
+SL_TICKS     = 60   # live_config.json orb.stop_loss_ticks=60 (15 points for MNQ)
 TARGET_TICKS = 48
 ORB_HIGH     = 17510.0
 ORB_LOW      = 17490.0
 # SL for LONG = orb_high - sl_ticks * tick_size  (see MicroORBStrategy._check_breakout)
-EXPECTED_SL      = round(ORB_HIGH - SL_TICKS * TICK_SIZE, 4)   # 17506.0
+EXPECTED_SL      = round(ORB_HIGH - SL_TICKS * TICK_SIZE, 4)   # 17495.0
 EXPECTED_ENTRY   = 17520.0
 EXPECTED_TARGET  = round(EXPECTED_ENTRY + TARGET_TICKS * TICK_SIZE, 4)  # 17532.0
 

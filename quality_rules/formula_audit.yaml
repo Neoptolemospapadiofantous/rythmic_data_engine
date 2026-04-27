@@ -182,3 +182,29 @@ invariants:
     description: "For losers, net_pnl < gross_pnl (commission makes it worse)"
     check: "runtime"
     invariant: "gross_pnl <= 0 => net_pnl == gross_pnl - 4.0"
+
+  - id: INV-006
+    name: trade_route_not_simulator
+    description: "live_config.json trade_route must NOT be 'simulator' — simulator routes paper orders to Rithmic's test system, bypassing real markets even with dry_run=False"
+    check: "config_value"
+    config_key: "trade_route"
+    forbidden_value: "simulator"
+    expected_value: "Rithmic Order Routing"
+
+  - id: INV-007
+    name: risk_params_flat_keys_exist
+    description: "C++ executor reads trailing_drawdown_cap and consistency_cap_pct as flat JSON keys — they must exist in live_config.json and agree with prop_firm nested values"
+    check: "config_value"
+    required_flat_keys:
+      - key: "trailing_drawdown_cap"
+        must_match: "prop_firm.trailing_drawdown_limit"
+      - key: "consistency_cap_pct"
+        must_match: "prop_firm.consistency_rule_pct"
+
+  - id: INV-008
+    name: max_daily_trades_flat_equals_prop_firm
+    description: "Flat max_daily_trades (read by C++) must equal prop_firm.max_daily_trades (Legends limit) — C++ can never be allowed to exceed prop firm rules"
+    check: "config_value"
+    flat_key: "max_daily_trades"
+    nested_key: "prop_firm.max_daily_trades"
+    invariant: "flat == nested"

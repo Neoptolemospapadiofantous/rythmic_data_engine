@@ -155,10 +155,19 @@ def _gate_dry_run(cfg: dict) -> GateResult:
     dry = cfg.get("dry_run")
     if dry is True:
         return GateResult("C. dry_run currently True (paper mode)", True)
+    if dry is False:
+        # Already live — not an error for pre-flight verification, just note it.
+        # --confirm-live requires dry_run=True BEFORE promotion; once live, re-runs
+        # of go_live.py for diagnostic purposes should still check remaining gates.
+        return GateResult(
+            "C. dry_run currently True (paper mode)",
+            True,
+            "dry_run=False — system already in live mode (pass for re-verification)",
+        )
     return GateResult(
         "C. dry_run currently True (paper mode)",
         False,
-        f"dry_run={dry!r} — system is already in live mode or misconfigured",
+        f"dry_run={dry!r} — invalid value; must be true or false",
     )
 
 
@@ -437,6 +446,16 @@ def run_preflight(args: list[str]) -> tuple[int, list[GateResult]]:
             "  Add --confirm-live to enable live trading.\n"
         )
         return 0, results
+
+    # --confirm-live requires dry_run=True in config; refuse if already live
+    if cfg.get("dry_run") is not True:
+        print(
+            f"  {_FAIL}  --confirm-live requires dry_run=True in config.\n"
+            "  System is already in live mode (dry_run=False). "
+            "Promotion not needed.\n",
+            file=sys.stderr,
+        )
+        return 1, results
 
     # Promote
     try:

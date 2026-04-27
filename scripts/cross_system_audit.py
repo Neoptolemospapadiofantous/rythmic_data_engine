@@ -239,6 +239,76 @@ def check_micro_orb_point_value() -> list[dict]:
     return findings
 
 
+def check_trade_route() -> list[dict]:
+    """Check 6: trade_route in live_config.json must not be 'simulator' (XSYS-009 / BUG-14)."""
+    findings = []
+    if not CONFIG_PATH.exists():
+        return [_fail("trade_route_not_simulator", "live_config.json not found")]
+
+    with open(CONFIG_PATH) as f:
+        cfg = json.load(f)
+
+    route = cfg.get("trade_route", "")
+    if route == "simulator":
+        findings.append(_fail("trade_route_not_simulator",
+            f"live_config.json trade_route='simulator' — C++ executor will route ALL orders "
+            f"to Rithmic paper simulator even with dry_run=False. "
+            f"Set trade_route='Rithmic Order Routing' for live trading."))
+    elif not route:
+        findings.append(_warn("trade_route_not_simulator",
+            "live_config.json trade_route is missing — C++ will use default 'Rithmic Order Routing'"))
+    else:
+        findings.append(_pass("trade_route_not_simulator",
+            f"trade_route='{route}' (not simulator)"))
+
+    return findings
+
+
+def check_risk_params_consistency() -> list[dict]:
+    """Check 7: flat risk keys match prop_firm nested values (XSYS-010 / BUG-15 + BUG-16)."""
+    findings = []
+    if not CONFIG_PATH.exists():
+        return [_fail("risk_params_flat_match_prop_firm", "live_config.json not found")]
+
+    with open(CONFIG_PATH) as f:
+        cfg = json.load(f)
+
+    prop = cfg.get("prop_firm", {})
+
+    checks = [
+        ("trailing_drawdown_cap",  prop.get("trailing_drawdown_limit"), "prop_firm.trailing_drawdown_limit"),
+        ("consistency_cap_pct",    prop.get("consistency_rule_pct"),    "prop_firm.consistency_rule_pct"),
+        ("max_daily_trades",       prop.get("max_daily_trades"),        "prop_firm.max_daily_trades"),
+    ]
+
+    for flat_key, nested_val, nested_path in checks:
+        flat_val = cfg.get(flat_key)
+
+        if flat_val is None:
+            findings.append(_fail(f"risk_flat_{flat_key}",
+                f"Flat key '{flat_key}' missing from live_config.json — "
+                f"C++ executor will use hardcoded default (ignoring {nested_path})"))
+            continue
+
+        if nested_val is None:
+            findings.append(_warn(f"risk_flat_{flat_key}",
+                f"'{nested_path}' missing — cannot verify flat key '{flat_key}'={flat_val} is consistent"))
+            continue
+
+        # For daily_loss_limit the flat key is negative (C++ threshold) — daily_loss_limit special-cased elsewhere
+        # For these three, flat and nested must be numerically equal (same sign)
+        if abs(float(flat_val) - float(nested_val)) > 0.001:
+            findings.append(_fail(f"risk_flat_{flat_key}",
+                f"Mismatch: flat '{flat_key}'={flat_val} != {nested_path}={nested_val} — "
+                f"C++ executor enforces {flat_val}, Legends limit is {nested_val}. "
+                f"If C++ is more permissive it will violate prop firm rules."))
+        else:
+            findings.append(_pass(f"risk_flat_{flat_key}",
+                f"flat '{flat_key}'={flat_val} matches {nested_path}={nested_val}"))
+
+    return findings
+
+
 def run_audit() -> list[dict]:
     findings: list[dict] = []
     findings.extend(check_cpp_tick_value())
@@ -246,6 +316,8 @@ def run_audit() -> list[dict]:
     findings.extend(check_symbol_consistency())
     findings.extend(check_python_point_value_default())
     findings.extend(check_micro_orb_point_value())
+    findings.extend(check_trade_route())
+    findings.extend(check_risk_params_consistency())
     return findings
 
 

@@ -69,26 +69,27 @@ Verify:
 
 ---
 
-## Step 4 — Pre-flight dry run (all 9 gates)
+## Step 4 — Pre-flight dry run (all 10 gates)
 
 ```bash
 # Run go_live.py WITHOUT --confirm-live first — just check gates
 python go_live.py --config config/live_config.json
 ```
 
-All 9 gates must show PASS:
+All 10 gates must show PASS:
 
 | Gate | Check |
 |------|-------|
 | A | NO_DEPLOY lockfile absent |
 | B | config/live_config.json valid JSON with required keys |
-| C | dry_run currently True (paper mode) |
+| C | dry_run currently True (paper mode) — passes if already live for re-verification |
 | D | PostgreSQL reachable |
 | E | TLS certificate file present |
 | F | ML model file + sha256 checksum |
-| G | Prop firm daily loss limit > 0 |
-| H | Prop firm max position size > 0 |
-| I | Disk space > 5 GB free |
+| G | Disk space > 5 GB free |
+| H | No data/DRIFT_HALT file |
+| I | Prop firm limits set (daily_loss_limit > 0, max_position_size > 0) |
+| J | Account equity above minimum (optional — set PNL_PLANT_EQUITY env var) |
 
 If any gate fails, fix the issue and re-run before proceeding.
 
@@ -113,7 +114,7 @@ python go_live.py --config config/live_config.json --confirm-live
 ```
 
 This command:
-1. Re-runs all 9 gates
+1. Re-runs all 10 gates
 2. Atomically writes `dry_run: false` to `config/live_config.json` (via tempfile + rename)
 3. Removes the NO_DEPLOY lockfile if present
 4. Prints a promotion summary
