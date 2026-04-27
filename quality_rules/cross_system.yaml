@@ -247,3 +247,12 @@ contracts:
       - "flat consistency_cap_pct == prop_firm.consistency_rule_pct"
       - "flat max_daily_trades == prop_firm.max_daily_trades"
     status: OK  # FIXED 2026-04-28 — BUG-15 + BUG-16
+
+  - id: XSYS-011
+    name: systemd_service_runs_cpp_executor
+    description: "Oracle VM systemd must start nq_executor (C++ binary), not live_trader.py which raises NotImplementedError on first live signal"
+    impact: "P0 — live orders would silently fail on first signal if Python service were running"
+    service_file: "deploy/nq_executor.service"
+    exec_start: "/home/opc/rithmic_engine/build/nq_executor /home/opc/rithmic_engine/config/live_config.json"
+    deploy_script: "deploy.sh push <host>"
+    status: FIXED  # 2026-04-28 — created nq_executor.service, updated deploy.sh

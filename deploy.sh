@@ -5,14 +5,15 @@
 # ─────
 #   bash deploy.sh              # full first-time setup (run on Oracle VM itself)
 #   bash deploy.sh setup        # same as above (explicit)
-#   bash deploy.sh push [HOST]  # push binaries + config + service file, restart
+#   bash deploy.sh push [HOST]  # push C++ binaries + config + service file, restart
 #
 # Environment variables for push mode
 #   ORACLE_VM_HOST  — ssh target, e.g. opc@152.x.x.x (overridden by CLI arg)
 #   ORACLE_VM_KEY   — path to SSH private key (default: ~/.ssh/id_rsa)
 #
 # push mode does NOT rebuild on the remote — it pushes the local build/ artefacts.
-# Run `cmake --build build --target rithmic_engine` locally before pushing.
+# Run `cmake --build build --target nq_executor` locally before pushing.
+# Oracle VM runs C++ only — no Python files are pushed.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,11 +31,11 @@ _do_push() {
         exit 1
     fi
 
-    # Verify local binary exists before pushing
-    local binary="$SCRIPT_DIR/build/rithmic_engine"
+    # Verify nq_executor binary exists before pushing
+    local binary="$SCRIPT_DIR/build/nq_executor"
     if [[ ! -f "$binary" ]]; then
         echo "ERROR: $binary not found — build first:"
-        echo "  cmake --build $SCRIPT_DIR/build --target rithmic_engine"
+        echo "  cmake --build $SCRIPT_DIR/build --target nq_executor"
         exit 1
     fi
 
@@ -42,25 +43,23 @@ _do_push() {
     local SSH_OPTS="-i $ssh_key -o StrictHostKeyChecking=no -o BatchMode=yes"
 
     # 1. Ensure remote directory structure exists
-    echo "[1/5] Ensuring remote directories..."
+    echo "[1/4] Ensuring remote directories..."
     ssh $SSH_OPTS "$host" "mkdir -p $remote_dir/{build,config,certs,data/logs,deploy}"
 
-    # 2. Push C++ binaries
-    echo "[2/5] Pushing build artefacts..."
-    rsync -az --delete-after \
-        -e "ssh $SSH_OPTS" \
-        "$SCRIPT_DIR/build/rithmic_engine" \
-        "$SCRIPT_DIR/build/test_connection" \
+    # 2. Push C++ binaries only — Oracle VM runs no Python
+    echo "[2/4] Pushing C++ build artefacts..."
+    rsync -az -e "ssh $SSH_OPTS" \
+        "$SCRIPT_DIR/build/nq_executor" \
         "$host:$remote_dir/build/"
-    # Push orb_strategy binary only if it exists (separate CMake target)
-    if [[ -f "$SCRIPT_DIR/build/orb_strategy" ]]; then
+    # test_connection is useful for smoke-testing Rithmic credentials on the VM
+    if [[ -f "$SCRIPT_DIR/build/test_connection" ]]; then
         rsync -az -e "ssh $SSH_OPTS" \
-            "$SCRIPT_DIR/build/orb_strategy" \
+            "$SCRIPT_DIR/build/test_connection" \
             "$host:$remote_dir/build/"
     fi
 
-    # 3. Push config, certs, and Python trading sources
-    echo "[3/5] Pushing config, certs, and Python sources..."
+    # 3. Push config and certs — no Python sources
+    echo "[3/4] Pushing config and certs..."
     rsync -az \
         -e "ssh $SSH_OPTS" \
         "$SCRIPT_DIR/config/" \
@@ -69,50 +68,38 @@ _do_push() {
         -e "ssh $SSH_OPTS" \
         "$SCRIPT_DIR/certs/" \
         "$host:$remote_dir/certs/"
-    # Push Python trading files if they exist (live_trader.py built by Builder 3)
-    for f in live_trader.py go_live.py; do
-        if [[ -f "$SCRIPT_DIR/$f" ]]; then
-            rsync -az -e "ssh $SSH_OPTS" "$SCRIPT_DIR/$f" "$host:$remote_dir/"
-        fi
-    done
-    if [[ -d "$SCRIPT_DIR/strategy" ]]; then
-        rsync -az --delete-after \
-            -e "ssh $SSH_OPTS" \
-            --exclude='*.pyc' --exclude='__pycache__' \
-            "$SCRIPT_DIR/strategy/" \
-            "$host:$remote_dir/strategy/"
-    fi
 
     # 4. Install/update systemd service file
-    echo "[4/5] Installing systemd unit..."
+    echo "[4/4] Installing systemd unit..."
     rsync -az -e "ssh $SSH_OPTS" \
-        "$SCRIPT_DIR/deploy/live_trader.service" \
-        "$host:/tmp/live_trader.service"
+        "$SCRIPT_DIR/deploy/nq_executor.service" \
+        "$host:/tmp/nq_executor.service"
     ssh $SSH_OPTS "$host" \
-        "sudo mv /tmp/live_trader.service /etc/systemd/system/live_trader.service \
-        && sudo chmod 644 /etc/systemd/system/live_trader.service \
+        "sudo mv /tmp/nq_executor.service /etc/systemd/system/nq_executor.service \
+        && sudo chmod 644 /etc/systemd/system/nq_executor.service \
         && sudo systemctl daemon-reload \
-        && sudo systemctl enable live_trader"
+        && sudo systemctl enable nq_executor"
 
-    # 5. Restart the service if already running; leave it stopped otherwise to
-    #    avoid unintended live trading on a fresh deploy.
-    echo "[5/5] Checking service state..."
-    if ssh $SSH_OPTS "$host" "sudo systemctl is-active --quiet live_trader 2>/dev/null"; then
-        ssh $SSH_OPTS "$host" "sudo systemctl restart live_trader"
+    # Restart only if already running; leave stopped on fresh deploy to prevent
+    # accidental live order flow before the operator has verified config.
+    echo ""
+    echo "--- Service state ---"
+    if ssh $SSH_OPTS "$host" "sudo systemctl is-active --quiet nq_executor 2>/dev/null"; then
+        ssh $SSH_OPTS "$host" "sudo systemctl restart nq_executor"
         echo "   Service restarted."
     else
         echo "   Service is stopped — not auto-starting (prevents accidental live trading)."
-        echo "   To start:  ssh $host 'sudo systemctl start live_trader'"
+        echo "   To start:  ssh $host 'sudo systemctl start nq_executor'"
     fi
 
     echo ""
     ssh $SSH_OPTS "$host" \
-        "sudo systemctl status live_trader --no-pager -l 2>&1 | head -20" || true
+        "sudo systemctl status nq_executor --no-pager -l 2>&1 | head -20" || true
     echo ""
     echo "=== Push complete → $host ==="
-    echo "Logs:    ssh $host 'sudo journalctl -u live_trader -n 50 --no-pager'"
-    echo "Start:   ssh $host 'sudo systemctl start live_trader'"
-    echo "Stop:    ssh $host 'sudo systemctl stop live_trader'"
+    echo "Logs:    ssh $host 'sudo journalctl -u nq_executor -n 50 --no-pager'"
+    echo "Start:   ssh $host 'sudo systemctl start nq_executor'"
+    echo "Stop:    ssh $host 'sudo systemctl stop nq_executor'"
 }
 
 # ── setup subcommand (first-time server setup, run on the Oracle VM itself) ──
@@ -171,8 +158,8 @@ REPO
     sudo ldconfig
     echo "   Boost 1.83 OK"
 
-    # ── Build rithmic_engine ──────────────────────────────────────────────
-    echo "[4/5] Building rithmic_engine..."
+    # ── Build nq_executor ─────────────────────────────────────────────────
+    echo "[4/5] Building nq_executor..."
     cd ~/rithmic_engine
     rm -rf build
     mkdir build
@@ -182,7 +169,7 @@ REPO
         -DPostgreSQL_ROOT=/usr/pgsql-16 \
         -DBOOST_ROOT=/usr/local \
         -DBoost_NO_SYSTEM_PATHS=ON
-    make -j"$(nproc)"
+    make -j"$(nproc)" nq_executor test_connection
     echo "   Build OK"
 
     # ── .env ─────────────────────────────────────────────────────────────
@@ -195,11 +182,12 @@ REPO
 
     echo ""
     echo "=== Setup complete ==="
-    echo "Test:  cd ~/rithmic_engine/build && ./test_connection ../.env"
-    echo "Run:   cd ~/rithmic_engine/build && ./rithmic_engine ../.env"
+    echo "Test:    cd ~/rithmic_engine/build && ./test_connection ../.env"
+    echo "Service: sudo systemctl start nq_executor"
+    echo "Logs:    sudo journalctl -u nq_executor -f"
     echo ""
     echo "To push updates from your workstation later:"
-    echo "  bash deploy.sh push opc@<ip>"
+    echo "  cmake --build build --target nq_executor && bash deploy.sh push opc@<ip>"
 }
 
 # ── subcommand dispatch (must come after function definitions) ────────────────
