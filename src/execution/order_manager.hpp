@@ -96,7 +96,7 @@ public:
     // ── Called by OrbStrategy signal callback ─────────────────────────────────
     void on_signal(OrbSignal sig, double price, const std::string& reason) {
         if (sig == OrbSignal::FLATTEN_EOD) {
-            flatten_now("eod_flatten");
+            flatten_now("eod_flatten", price);
             return;
         }
         if (sig != OrbSignal::BUY && sig != OrbSignal::SELL) return;
@@ -336,7 +336,7 @@ public:
     }
 
     // ── Force flatten (EOD or kill switch) ────────────────────────────────────
-    void flatten_now(const std::string& reason) {
+    void flatten_now(const std::string& reason, double price = 0.0) {
         std::lock_guard<std::mutex> lk(state_mu_);
         if (pos_.state == PosState::FLAT) {
             LOG("[OM] flatten_now('%s') — already flat", reason.c_str());
@@ -354,7 +354,7 @@ public:
             LOG("[OM] flatten_now('%s') — exit already pending", reason.c_str());
             return;
         }
-        initiate_exit_locked(reason, 0.0);
+        initiate_exit_locked(reason, price);
     }
 
     // ── Reject notification (entry rejected by exchange) ─────────────────────
@@ -636,9 +636,21 @@ private:
             return;
         }
 
-        lat_.on_submit(basket, ref_price);
+        // Legends prop accounts reject MARKET (type=2). Use an aggressive LIMIT that
+        // crosses the spread immediately. 50-tick offset (~12.5 pts) when no ref_price
+        // is available (kill signal); 4-tick offset otherwise (same as entry orders).
+        constexpr double TICK = 0.25;
+        int offset_ticks = (ref_price > 0.0) ? 4 : 50;
+        double limit_px = exit_is_buy
+            ? ref_price + offset_ticks * TICK
+            : ref_price - offset_ticks * TICK;
+        if (ref_price <= 0.0) limit_px = exit_is_buy
+            ? pos_.sl_price + offset_ticks * TICK
+            : pos_.sl_price - offset_ticks * TICK;
+
+        lat_.on_submit(basket, ref_price > 0.0 ? ref_price : pos_.sl_price);
         bool ok = order_cb_(basket, cfg_.symbol, cfg_.exchange,
-                             pos_.qty, /*MARKET=2*/2, exit_is_buy, 0.0, reason);
+                             pos_.qty, /*LIMIT=1*/1, exit_is_buy, limit_px, reason);
         if (!ok) {
             LOG("[OM] ERROR: exit order_cb_ returned false basket=%s", basket.c_str());
         }
