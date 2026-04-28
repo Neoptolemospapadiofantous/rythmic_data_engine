@@ -254,7 +254,7 @@ struct OrderPlant {
     std::string               trade_route = "Rithmic Order Routing";
     std::string               trade_symbol;  // front-month contract e.g. NQM6
 
-    // Send RequestNewOrder (template 314)
+    // Send RequestNewOrder (template 312)
     // Returns basket_id if sent, empty string on error
     std::string send_new_order(const std::string& basket_id,
                                const std::string& symbol,
@@ -317,7 +317,7 @@ struct OrderPlant {
         }
     }
 
-    // Send RequestModifyOrder (template 314) — atomically changes stop trigger_price.
+    // Send RequestModifyOrder (template 313) — atomically changes stop trigger_price.
     // Returns true if sent successfully.
     bool send_modify_order(const std::string& basket_id,
                            double new_trigger_price,
@@ -1023,7 +1023,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 }
             } catch (...) { login_ok = false; }
             if (!login_ok) {
-                LOG("[LEGENDS_MD] Login failed — retry in 1s");
+                LOG("[LEGENDS_MD] Login failed — retry in 30s");
                 asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(30));
                 co_await t.async_wait(asio::use_awaitable); continue;
             }
