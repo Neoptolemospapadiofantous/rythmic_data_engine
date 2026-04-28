@@ -7,6 +7,14 @@ cd "$(dirname "$0")/.."
 echo "==> Stopping service..."
 sudo systemctl stop nq_executor 2>/dev/null || true
 
+echo "==> Stashing local Oracle edits..."
+git stash 2>/dev/null || true
+
+echo "==> Moving untracked config files out of the way..."
+for f in config/MES_config.json config/MNQ_config.json config/MYM_config.json; do
+    [ -f "$f" ] && mv "$f" /tmp/ && echo "  moved $f to /tmp/" || true
+done
+
 echo "==> Pulling latest code..."
 git pull origin main
 
