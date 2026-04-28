@@ -70,16 +70,23 @@ _do_push() {
         "$SCRIPT_DIR/certs/" \
         "$host:$remote_dir/certs/"
 
-    # 4. Install/update systemd service file
-    echo "[4/4] Installing systemd unit..."
+    # 4. Install/update systemd service files (single + template unit)
+    echo "[4/4] Installing systemd units..."
     rsync -az -e "ssh $SSH_OPTS" \
         "$SCRIPT_DIR/deploy/nq_executor.service" \
-        "$host:/tmp/nq_executor.service"
+        "$SCRIPT_DIR/deploy/nq_executor@.service" \
+        "$host:/tmp/"
     ssh $SSH_OPTS "$host" \
-        "sudo mv /tmp/nq_executor.service /etc/systemd/system/nq_executor.service \
+        "sudo mv /tmp/nq_executor.service  /etc/systemd/system/nq_executor.service \
+        && sudo mv /tmp/nq_executor@.service /etc/systemd/system/nq_executor@.service \
         && sudo chmod 644 /etc/systemd/system/nq_executor.service \
+                          /etc/systemd/system/nq_executor@.service \
         && sudo systemctl daemon-reload \
         && sudo systemctl enable nq_executor"
+
+    # Fix SELinux label on binary so systemd can exec it (Oracle Linux 9)
+    echo "[SELinux] Relabelling nq_executor binary..."
+    ssh $SSH_OPTS "$host" "sudo chcon -t bin_t $remote_dir/build/nq_executor || true"
 
     # Restart only if already running; leave stopped on fresh deploy to prevent
     # accidental live order flow before the operator has verified config.
