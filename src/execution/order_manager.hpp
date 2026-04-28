@@ -143,8 +143,31 @@ public:
 
         if (is_entry_fill) {
             if (pos_.state != PosState::PENDING_ENTRY) {
-                LOG("[OM] Spurious entry fill basket=%s (state=%d)",
-                    basket_id.c_str(), (int)pos_.state);
+                // Late fill after EOD cancel: the cancel raced and entry filled anyway.
+                // Exchange has an open position; fire an immediate unwind.
+                if (!pending_cancel_basket_.empty() && basket_id == pending_cancel_basket_) {
+                    bool unwind_is_buy = !pending_cancel_was_buy_; // reverse the entry direction
+                    LOG("[OM] CRITICAL: Late fill after EOD cancel basket=%s px=%.2f — "
+                        "unwind %s immediately",
+                        basket_id.c_str(), fill_price, unwind_is_buy ? "BUY" : "SELL");
+                    pending_cancel_basket_.clear();
+                    if (order_cb_) {
+                        std::string basket = new_basket_id();
+                        lat_.on_signal(basket, fill_price, false);
+                        constexpr double TICK = 0.25;
+                        constexpr int    OFFSET_TICKS = 4;
+                        double unwind_px = unwind_is_buy
+                            ? fill_price + OFFSET_TICKS * TICK
+                            : fill_price - OFFSET_TICKS * TICK;
+                        bool ok = order_cb_(basket, cfg_.symbol, cfg_.exchange,
+                                            cfg_.qty, /*LIMIT=1*/1, unwind_is_buy,
+                                            unwind_px, "eod_cancel_race_unwind");
+                        if (ok) lat_.on_submit(basket, fill_price);
+                    }
+                } else {
+                    LOG("[OM] Spurious entry fill basket=%s (state=%d)",
+                        basket_id.c_str(), (int)pos_.state);
+                }
                 return;
             }
             if (pos_.basket_id_entry != basket_id) {
@@ -352,6 +375,10 @@ public:
         if (pos_.state == PosState::PENDING_ENTRY) {
             LOG("[OM] flatten_now('%s') — cancelling pending entry basket=%s",
                 reason.c_str(), pos_.basket_id_entry.c_str());
+            // Save cancel context before resetting: if the fill races the cancel and
+            // arrives after pos_ is cleared, the spurious-fill handler will unwind it.
+            pending_cancel_basket_  = pos_.basket_id_entry;
+            pending_cancel_was_buy_ = (pos_.direction == OrbSignal::BUY);
             if (cancel_cb_ && !pos_.basket_id_entry.empty())
                 cancel_cb_(pos_.basket_id_entry);
             pos_ = Position{};
@@ -371,6 +398,14 @@ public:
         if (pos_.basket_id_entry == basket_id && pos_.state == PosState::PENDING_ENTRY) {
             pos_ = Position{};
             LOG("[OM] Reverted to FLAT after entry rejection");
+        } else if (pos_.basket_id_exit == basket_id && pos_.state == PosState::PENDING_EXIT) {
+            // Exit order rejected — revert state so the position can be re-exited.
+            // This can leave a live position open if rejections repeat; LOG as CRITICAL.
+            LOG("[OM] CRITICAL: Exit order rejected basket=%s — reverting to %s, retrying exit",
+                basket_id.c_str(), pos_.direction == OrbSignal::BUY ? "LONG" : "SHORT");
+            pos_.state = (pos_.direction == OrbSignal::BUY) ? PosState::LONG : PosState::SHORT;
+            pos_.basket_id_exit.clear();
+            initiate_exit_locked("rejected_exit_retry", 0.0);
         } else if (pos_.basket_id_stop == basket_id) {
             // Stop order rejected — clear basket so software SL fallback activates
             pos_.basket_id_stop.clear();
@@ -483,6 +518,10 @@ private:
     // Stale stop unwind state (fires when old stop fills after position already closed)
     std::string last_stop_for_unwind_;      // basket of stop sent to cancel at position close
     bool        last_stop_was_buy_ = false; // true = stop was a BUY (SHORT position)
+
+    // EOD cancel race guard: entry cancel sent but fill arrived after pos_ was reset
+    std::string pending_cancel_basket_;     // entry basket that was cancelled at EOD
+    bool        pending_cancel_was_buy_ = false; // direction of the cancelled entry
 
     static std::atomic<uint64_t> seq_;  // monotonic sequence for basket IDs
 
