@@ -1,0 +1,63 @@
+# systemd template unit — one instance per instrument/config.
+#
+# Instance name = config file stem (without _config.json)
+# Examples:
+#   sudo systemctl start  nq_executor@MNQ   → runs with config/MNQ_config.json
+#   sudo systemctl start  nq_executor@MES   → runs with config/MES_config.json
+#   sudo systemctl start  nq_executor@MYM   → runs with config/MYM_config.json
+#   sudo systemctl enable nq_executor@MNQ nq_executor@MES
+#
+# Install:  sudo cp deploy/nq_executor@.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#
+# Logs:     journalctl -u nq_executor@MNQ -f
+# Stop:     sudo systemctl stop nq_executor@MNQ   (SIGTERM → flatten)
+
+[Unit]
+Description=NQ ORB Live Executor — %I
+Documentation=https://github.com/neoptolemospapadiofantous/rithmic_engine
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+Requires=postgresql-16.service
+
+[Service]
+Type=simple
+
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/rithmic_engine
+
+# Load credentials from .env (KEY=value format)
+EnvironmentFile=/home/opc/rithmic_engine/.env
+
+# %I is the unescaped instance name (e.g. MNQ, MES, MYM)
+ExecStartPre=/bin/bash -c \
+    '[ ! -f /home/opc/rithmic_engine/NO_DEPLOY ] || \
+     { echo "NO_DEPLOY lockfile present — refusing to start %I executor"; exit 1; }'
+
+ExecStart=/home/opc/rithmic_engine/build/nq_executor \
+    /home/opc/rithmic_engine/config/%I_config.json
+
+TimeoutStartSec=90s
+
+Restart=on-failure
+RestartSec=30s
+StartLimitIntervalSec=300s
+StartLimitBurst=3
+
+TimeoutStopSec=30s
+KillMode=process
+KillSignal=SIGTERM
+SendSIGKILL=yes
+FinalKillSignal=SIGKILL
+TimeoutKillSec=60s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=nq_executor_%I
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -21,7 +21,9 @@
 
 class OrbDB {
 public:
-    explicit OrbDB(const std::string& connstr) : connstr_(connstr) {
+    explicit OrbDB(const std::string& connstr,
+                   const std::string& instrument = "MNQ")
+        : connstr_(connstr), instrument_(instrument) {
         conn_ = PQconnectdb(connstr_.c_str());
         if (!conn_ || PQstatus(conn_) != CONNECTION_OK)
             throw std::runtime_error(std::string("OrbDB connect failed: ") +
@@ -63,17 +65,18 @@ public:
         char sql[2048];
         std::snprintf(sql, sizeof(sql),
             "INSERT INTO live_trades"
-            "(trade_date, direction, entry_time, exit_time, entry_price, exit_price, "
+            "(instrument, trade_date, direction, entry_time, exit_time, entry_price, exit_price, "
             " sl_price, qty, pnl_points, pnl_usd, exit_reason, "
             " signal_to_submit_us, submit_to_fill_ms, entry_slippage_ticks, exit_slippage_ticks, "
             " mae_pts, mfe_pts, trigger_price, fill_price) "
             "VALUES "
-            "('%s', '%s', "
+            "('%s', '%s', '%s', "
             " to_timestamp(%lld::bigint / 1000000.0),"
             " %s, "
             " %.4f, %.4f, %.4f, %d, %.4f, %.4f, '%s', "
             " %lld, %lld, %d, %d, "
             " %.4f, %.4f, %.4f, %.4f)",
+            instrument_.c_str(),
             trade_date.c_str(),
             direction.c_str(),
             (long long)(entry_lat.fill_ts_ns / 1000),   // ns → us
@@ -107,15 +110,17 @@ public:
         char sql[1024];
         std::snprintf(sql, sizeof(sql),
             "INSERT INTO live_sessions"
-            "(session_date, orb_high, orb_low, orb_range, trades_taken, "
+            "(session_date, instrument, strategy, orb_high, orb_low, orb_range, trades_taken, "
             " daily_pnl_usd, peak_equity, risk_halted, halt_reason) "
-            "VALUES ('%s', %.4f, %.4f, %.4f, %d, %.4f, %.4f, %s, '%s') "
-            "ON CONFLICT (session_date) DO UPDATE SET "
+            "VALUES ('%s', '%s', '%s', %.4f, %.4f, %.4f, %d, %.4f, %.4f, %s, '%s') "
+            "ON CONFLICT (session_date, instrument, strategy) DO UPDATE SET "
             " orb_high=EXCLUDED.orb_high, orb_low=EXCLUDED.orb_low, "
             " orb_range=EXCLUDED.orb_range, trades_taken=EXCLUDED.trades_taken, "
             " daily_pnl_usd=EXCLUDED.daily_pnl_usd, peak_equity=EXCLUDED.peak_equity, "
             " risk_halted=EXCLUDED.risk_halted, halt_reason=EXCLUDED.halt_reason",
             trade_date.c_str(),
+            instrument_.c_str(),
+            strategy_.c_str(),
             orb_high, orb_low, (orb_high - orb_low),
             trades_taken, daily_pnl, peak_equity,
             risk_halted ? "TRUE" : "FALSE",
@@ -132,10 +137,10 @@ public:
         }
         char sql[512];
         std::snprintf(sql, sizeof(sql),
-            "INSERT INTO live_sessions(session_date, account_equity) "
-            "VALUES ('%s', %.4f) "
-            "ON CONFLICT (session_date) DO UPDATE SET account_equity=EXCLUDED.account_equity",
-            trade_date.c_str(), equity);
+            "INSERT INTO live_sessions(session_date, instrument, strategy, account_equity) "
+            "VALUES ('%s', '%s', '%s', %.4f) "
+            "ON CONFLICT (session_date, instrument, strategy) DO UPDATE SET account_equity=EXCLUDED.account_equity",
+            trade_date.c_str(), instrument_.c_str(), strategy_.c_str(), equity);
         try {
             exec(sql);
             LOG("[ORBDB] Account equity updated: $%.2f", equity);
@@ -183,16 +188,16 @@ public:
         char sql[2048];
         std::snprintf(sql, sizeof(sql),
             "INSERT INTO live_position "
-            "(session_date, state, direction, entry_price, entry_time, "
+            "(session_date, instrument, strategy, state, direction, entry_price, entry_time, "
             " current_price, unrealized_pnl_pts, unrealized_pnl_usd, "
             " sl_price, orb_high, orb_low, orb_set, "
             " trades_today, md_connected, op_connected, last_updated) "
             "VALUES "
-            "('%s', '%s', %s, %s, %s, "
+            "('%s', '%s', '%s', '%s', %s, %s, %s, "
             " %.4f, %.4f, %.4f, "
             " %s, %.4f, %.4f, %s, "
             " %d, %s, %s, NOW()) "
-            "ON CONFLICT (session_date) DO UPDATE SET "
+            "ON CONFLICT (session_date, instrument, strategy) DO UPDATE SET "
             " state=EXCLUDED.state, direction=EXCLUDED.direction, "
             " entry_price=EXCLUDED.entry_price, entry_time=EXCLUDED.entry_time, "
             " current_price=EXCLUDED.current_price, "
@@ -204,6 +209,8 @@ public:
             " md_connected=EXCLUDED.md_connected, op_connected=EXCLUDED.op_connected, "
             " last_updated=NOW()",
             session_date.c_str(),
+            instrument_.c_str(),
+            strategy_.c_str(),
             state.c_str(),
             dir_lit.c_str(),
             eprice_lit.c_str(),
@@ -230,8 +237,12 @@ public:
     // ── Get total historical P&L (for seeding RiskManager on startup) ─────────
     double get_total_pnl() {
         if (!is_connected()) reconnect();
-        PGresult* res = PQexec(conn_,
-            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM live_trades");
+        char pnl_sql[256];
+        std::snprintf(pnl_sql, sizeof(pnl_sql),
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM live_trades "
+            "WHERE instrument='%s' AND strategy='%s'",
+            instrument_.c_str(), strategy_.c_str());
+        PGresult* res = PQexec(conn_, pnl_sql);
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
             LOG("[ORBDB] get_total_pnl failed: %s", PQerrorMessage(conn_));
             if (res) PQclear(res);
@@ -245,10 +256,12 @@ public:
 
     // ── Read last N trade rows (for monitoring) ───────────────────────────────
     void print_recent_trades(int n = 10) {
-        char sql[256];
+        char sql[512];
         std::snprintf(sql, sizeof(sql),
             "SELECT trade_date, direction, entry_price, exit_price, pnl_usd, exit_reason "
-            "FROM live_trades ORDER BY entry_time DESC LIMIT %d", n);
+            "FROM live_trades WHERE instrument='%s' AND strategy='%s' "
+            "ORDER BY entry_time DESC LIMIT %d",
+            instrument_.c_str(), strategy_.c_str(), n);
 
         PGresult* res = PQexec(conn_, sql);
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -275,6 +288,8 @@ private:
         exec(R"(
             CREATE TABLE IF NOT EXISTS live_trades (
                 id                      BIGSERIAL PRIMARY KEY,
+                instrument              TEXT NOT NULL DEFAULT 'MNQ',
+                strategy                TEXT NOT NULL DEFAULT 'ORB',
                 trade_date              DATE NOT NULL,
                 direction               TEXT NOT NULL,
                 entry_time              TIMESTAMPTZ NOT NULL,
@@ -297,7 +312,9 @@ private:
             )
         )");
 
-        // Add new columns to existing table if they don't exist yet (idempotent)
+        // Add columns idempotently for existing deployments
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS instrument     TEXT NOT NULL DEFAULT 'MNQ'");
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS strategy       TEXT NOT NULL DEFAULT 'ORB'");
         exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS mae_pts        DOUBLE PRECISION");
         exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS mfe_pts        DOUBLE PRECISION");
         exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS trigger_price  DOUBLE PRECISION");
@@ -305,7 +322,9 @@ private:
 
         exec(R"(
             CREATE TABLE IF NOT EXISTS live_sessions (
-                session_date    DATE PRIMARY KEY,
+                session_date    DATE NOT NULL,
+                instrument      TEXT NOT NULL DEFAULT 'MNQ',
+                strategy        TEXT NOT NULL DEFAULT 'ORB',
                 orb_high        DOUBLE PRECISION,
                 orb_low         DOUBLE PRECISION,
                 orb_range       DOUBLE PRECISION,
@@ -314,17 +333,21 @@ private:
                 peak_equity     DOUBLE PRECISION,
                 risk_halted     BOOLEAN DEFAULT FALSE,
                 halt_reason     TEXT,
-                account_equity  DOUBLE PRECISION
+                account_equity  DOUBLE PRECISION,
+                PRIMARY KEY (session_date, instrument, strategy)
             )
         )");
 
-        // Add account_equity column to existing live_sessions if not present
+        exec("ALTER TABLE live_sessions ADD COLUMN IF NOT EXISTS instrument     TEXT NOT NULL DEFAULT 'MNQ'");
+        exec("ALTER TABLE live_sessions ADD COLUMN IF NOT EXISTS strategy       TEXT NOT NULL DEFAULT 'ORB'");
         exec("ALTER TABLE live_sessions ADD COLUMN IF NOT EXISTS account_equity DOUBLE PRECISION");
 
         exec(R"(
             CREATE TABLE IF NOT EXISTS live_position (
                 id                  SERIAL PRIMARY KEY,
                 session_date        DATE NOT NULL,
+                instrument          TEXT NOT NULL DEFAULT 'MNQ',
+                strategy            TEXT NOT NULL DEFAULT 'ORB',
                 state               TEXT NOT NULL DEFAULT 'FLAT',
                 direction           TEXT,
                 entry_price         DOUBLE PRECISION,
@@ -343,13 +366,16 @@ private:
             )
         )");
 
+        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS instrument TEXT NOT NULL DEFAULT 'MNQ'");
+        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS strategy   TEXT NOT NULL DEFAULT 'ORB'");
+
         exec(R"(
-            CREATE UNIQUE INDEX IF NOT EXISTS live_position_date_idx
-            ON live_position(session_date)
+            CREATE UNIQUE INDEX IF NOT EXISTS live_position_inst_strat_idx
+            ON live_position(session_date, instrument, strategy)
         )");
 
-        LOG("[ORBDB] Schema verified (live_trades: +mae_pts/mfe_pts/trigger_price/fill_price, "
-            "live_sessions: +account_equity, live_position)");
+        LOG("[ORBDB] Schema verified: instrument=%s strategy=%s",
+            instrument_.c_str(), strategy_.c_str());
     }
 
     void exec(const char* sql) {
@@ -370,5 +396,7 @@ private:
     }
 
     std::string connstr_;
+    std::string instrument_;
+    std::string strategy_ = "ORB";
     PGconn*     conn_ = nullptr;
 };

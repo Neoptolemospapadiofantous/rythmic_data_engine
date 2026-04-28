@@ -408,7 +408,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
     // ── DB setup ──────────────────────────────────────────────────────────────
     std::unique_ptr<OrbDB> db;
     try {
-        db = std::make_unique<OrbDB>(orb_cfg.pg_connstr());
+        db = std::make_unique<OrbDB>(orb_cfg.pg_connstr(), orb_cfg.symbol);
         LOG("[EXECUTOR] OrbDB connected");
         // Seed risk manager with historical P&L so consistency cap is correct
         if (today.empty()) {  // only on first startup, not reconnects
