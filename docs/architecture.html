@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Trading Platform — Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  padding: 0 32px;
+  overflow-x: auto;
+}
+.nav-brand {
+  font-weight: 700;
+  font-size: 0.9rem;
+  color: #58a6ff;
+  padding: 14px 20px 14px 0;
+  margin-right: 12px;
+  border-right: 1px solid #30363d;
+  white-space: nowrap;
+}
+.nav a {
+  color: #7d8590;
+  text-decoration: none;
+  font-size: 0.82rem;
+  padding: 14px 14px;
+  white-space: nowrap;
+  transition: color 0.15s;
+  border-bottom: 2px solid transparent;
+}
+.nav a:hover { color: #e6edf3; }
+.nav a.active { color: #f0f6fc; border-bottom-color: #58a6ff; }
+
+.page { max-width: 1300px; margin: 0 auto; padding: 40px 32px 80px; }
+
+.page-header { margin-bottom: 48px; }
+.page-header h1 { font-size: 1.7rem; font-weight: 700; color: #f0f6fc; margin-bottom: 8px; }
+.page-header p { color: #7d8590; font-size: 0.9rem; line-height: 1.6; max-width: 700px; }
+
+section { margin-bottom: 64px; scroll-margin-top: 60px; }
+
+.section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.tag {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 10px;
+  border-radius: 20px;
+  border: 1px solid;
+}
+.tag-problem  { color: #f85149; border-color: #f85149; }
+.tag-done     { color: #3fb950; border-color: #3fb950; }
+.tag-current  { color: #58a6ff; border-color: #58a6ff; }
+.tag-target   { color: #bc8cff; border-color: #bc8cff; }
+.tag-arch     { color: #58a6ff; border-color: #58a6ff; }
+.tag-expand   { color: #bc8cff; border-color: #bc8cff; }
+.tag-deploy   { color: #39c5cf; border-color: #39c5cf; }
+.tag-contract { color: #e3b341; border-color: #e3b341; }
+
+h2 { font-size: 1.15rem; font-weight: 600; color: #f0f6fc; }
+.section-desc { color: #7d8590; font-size: 0.85rem; margin-top: 4px; margin-bottom: 20px; line-height: 1.6; max-width: 800px; }
+
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 28px;
+  overflow-x: auto;
+}
+.card + .card { margin-top: 16px; }
+.card .mermaid { display: flex; justify-content: center; }
+
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+@media (max-width: 1000px) { .grid-2, .grid-3 { grid-template-columns: 1fr; } }
+
+.alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  margin-top: 12px;
+}
+.alert-red    { background: #2d1a1a; border: 1px solid #f85149; color: #f98080; }
+.alert-green  { background: #1a2d1a; border: 1px solid #3fb950; color: #7ee787; }
+.alert-blue   { background: #1a2040; border: 1px solid #58a6ff; color: #79c0ff; }
+.alert-yellow { background: #2d2412; border: 1px solid #d29922; color: #e3b341; }
+
+/* ── Module cards ── */
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+  margin-top: 4px;
+}
+.module-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 16px 18px;
+  transition: border-color 0.15s;
+}
+.module-card:hover { border-color: #58a6ff; }
+.module-card.live-card { border-color: #3fb950; }
+.mc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mc-icon { font-size: 1.1rem; }
+.mc-name { font-size: 0.9rem; font-weight: 600; color: #f0f6fc; }
+.mc-lang {
+  margin-left: auto;
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.lang-cpp    { background: #1e3a5f; color: #58a6ff; }
+.lang-python { background: #1f3a1f; color: #3fb950; }
+.lang-sql    { background: #3a2e10; color: #e3b341; }
+.mc-where { font-size: 0.72rem; color: #7d8590; margin-bottom: 8px; }
+.mc-status {
+  font-size: 0.68rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  margin-bottom: 6px;
+  display: inline-block;
+}
+.status-live   { background: #1a2d1a; color: #3fb950; }
+.status-local  { background: #1a2040; color: #79c0ff; }
+.status-future { background: #21262d; color: #7d8590; }
+.mc-owns { font-size: 0.78rem; color: #8b949e; line-height: 1.5; }
+.mc-interface {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #21262d;
+  font-size: 0.72rem;
+  color: #58a6ff;
+}
+
+/* ── Interface table ── */
+.interface-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+.interface-table th {
+  text-align: left;
+  padding: 10px 14px;
+  font-weight: 600;
+  font-size: 0.72rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #7d8590;
+  border-bottom: 1px solid #30363d;
+}
+.interface-table td {
+  padding: 10px 14px;
+  border-bottom: 1px solid #21262d;
+  vertical-align: top;
+  line-height: 1.5;
+}
+.interface-table tr:last-child td { border-bottom: none; }
+.interface-table code {
+  background: #21262d;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: #e3b341;
+}
+.badge-pg   { background: #2a1f3a; color: #bc8cff; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+.badge-rest { background: #1f2d1f; color: #3fb950; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+.badge-file { background: #2d2510; color: #e3b341; padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; }
+
+/* ── Roadmap ── */
+.roadmap { display: flex; flex-direction: column; gap: 0; }
+.roadmap-item {
+  display: flex;
+  gap: 16px;
+  position: relative;
+}
+.roadmap-item::before {
+  content: '';
+  position: absolute;
+  left: 18px;
+  top: 36px;
+  bottom: -16px;
+  width: 2px;
+  background: #30363d;
+}
+.roadmap-item:last-child::before { display: none; }
+.roadmap-left { display: flex; flex-direction: column; align-items: center; min-width: 38px; }
+.step-num {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: #21262d;
+  border: 2px solid #30363d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #58a6ff;
+  flex-shrink: 0;
+}
+.step-done {
+  background: #1a2d1a;
+  border-color: #3fb950;
+  color: #3fb950;
+}
+.roadmap-content {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  flex: 1;
+}
+.roadmap-content.done { border-color: #3fb950; }
+.roadmap-title { font-size: 0.92rem; font-weight: 600; color: #f0f6fc; margin-bottom: 4px; }
+.roadmap-desc  { font-size: 0.8rem; color: #7d8590; line-height: 1.5; }
+.roadmap-tags  { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+.roadmap-tag   { font-size: 0.7rem; padding: 2px 8px; border-radius: 4px; background: #21262d; color: #8b949e; }
+.roadmap-tag-done { background: #1a2d1a; color: #3fb950; }
+.effort { margin-left: auto; font-size: 0.75rem; color: #d29922; padding-top: 1px; }
+.effort-done { color: #3fb950; }
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <span class="nav-brand">⚡ Trading Platform</span>
+  <a href="#current-state">Current State</a>
+  <a href="#oracle">Oracle VM</a>
+  <a href="#local">Local Machine</a>
+  <a href="#data-flow">Data Flow</a>
+  <a href="#modules">All Modules</a>
+  <a href="#interfaces">Interfaces</a>
+  <a href="#expansion">Expansion</a>
+  <a href="#roadmap">Roadmap</a>
+</nav>
+
+<div class="page">
+
+<div class="page-header">
+  <h1>Trading Platform — Architecture</h1>
+  <p>MNQ ORB · Legends 50K · Rithmic / Oracle VM · Updated 2026-04-28<br>
+  Oracle VM = pure C++ appliance. All Python runs locally. PostgreSQL on Oracle, read remotely by UI.</p>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="current-state">
+  <div class="section-label"><span class="tag tag-done">Live Now</span><h2>What's Running Today</h2></div>
+  <p class="section-desc">This is the actual current production state — not aspirational.</p>
+
+  <div class="grid-3">
+
+    <div class="card">
+      <div class="alert alert-green">
+        <span>✅</span>
+        <div><strong>Oracle VM — C++ only</strong><br>
+        <code style="font-size:0.78rem;background:#21262d;padding:2px 5px;border-radius:3px">nq_executor.service</code> runs the C++ binary directly.
+        Zero Python on the VM. No interpreter, no venv, no pip.
+        Binary + JSON config + certs only.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="alert alert-green">
+        <span>✅</span>
+        <div><strong>Live UI reads PostgreSQL directly</strong><br>
+        <code style="font-size:0.78rem;background:#21262d;padding:2px 5px;border-radius:3px">/api/position · /api/session · /api/trades</code>
+        query Oracle VM's PG in real-time.
+        No EOD sync step. Set <code style="font-size:0.78rem;background:#21262d;padding:2px 5px;border-radius:3px">PG_HOST=&lt;oracle_ip&gt;</code> in <code style="font-size:0.78rem;background:#21262d;padding:2px 5px;border-radius:3px">/bot/.env</code> to activate.</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="alert alert-blue">
+        <span>ℹ️</span>
+        <div><strong>SQLite kept for backtests</strong><br>
+        Historical backtest sessions and ML runs still use
+        <code style="font-size:0.78rem;background:#21262d;padding:2px 5px;border-radius:3px">bot.db</code> (SQLite).
+        Live session data comes from PG. The two stores serve different purposes.</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="oracle">
+  <div class="section-label"><span class="tag tag-deploy">Oracle VM</span><h2>Oracle VM — Exact Contents</h2></div>
+  <p class="section-desc">Everything on the VM. Nothing else is allowed here.</p>
+
+  <div class="card">
+    <div class="mermaid">
+graph TD
+    subgraph ORACLE["☁️  Oracle VM — C++ only"]
+        direction TB
+
+        subgraph FILES["File system  /home/opc/rithmic_engine/"]
+            BIN["build/nq_executor\nbuild/test_connection"]
+            CFG["config/live_config.json\n(JSON only — no .py files)"]
+            CERTS["certs/  (Rithmic TLS)"]
+            DOTENV[".env  (credentials — set manually)"]
+        end
+
+        subgraph SYSTEMD["systemd"]
+            SVC["nq_executor.service\nType=simple · Restart=on-failure\nKillSignal=SIGTERM (triggers flatten)\nNO_DEPLOY lockfile guard"]
+            PG_SVC["postgresql-16.service\nTimescaleDB extension"]
+        end
+
+        subgraph RUNTIME["Runtime (single process)"]
+            NQE["nq_executor\nfeed + strategy + execution + risk\n— all in one C++ binary —"]
+            PG[("PostgreSQL  rithmic DB\nnq_trades · nq_session · nq_position")]
+        end
+
+        SVC -->|ExecStart| NQE
+        NQE -->|libpq writes| PG
+        NQE <-->|ticks + orders| RITHMIC["Rithmic\nLegendsTrading FCM"]
+    end
+
+    style BIN fill:#1e3a5f,color:#79c0ff
+    style SVC fill:#1a2d1a,color:#7ee787
+    style NQE fill:#1a2d1a,color:#7ee787
+    style PG fill:#2a1f3a,color:#d2a8ff
+    </div>
+  </div>
+
+  <div class="alert alert-green" style="margin-top:16px">
+    ✓ <strong>deploy.sh push</strong> sends: <code>nq_executor</code> binary · <code>live_config.json</code> (Python files excluded) · certs · <code>nq_executor.service</code>. Nothing else touches the VM.
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="local">
+  <div class="section-label"><span class="tag tag-arch">Local</span><h2>Local Machine — Exact Contents</h2></div>
+  <p class="section-desc">Two repos, two purposes. Neither runs on Oracle.</p>
+
+  <div class="grid-2">
+
+    <div class="card">
+      <h3 style="font-size:0.9rem;color:#58a6ff;margin-bottom:12px">/bot  — UI + backtest + ML</h3>
+      <table class="interface-table">
+        <tr><td style="color:#7d8590;font-size:0.75rem;width:120px">ui/</td><td>FastAPI :8080<br><span style="font-size:0.75rem;color:#7d8590">Serves dashboard · /api/position + /session + /trades → PG direct</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">python/strategy/</td><td>Backtest engine · ML pipeline · features<br><span style="font-size:0.75rem;color:#7d8590">Runs locally, writes results to SQLite</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">python/db/</td><td>aiosqlite (backtest) + psycopg2 (live PG)<br><span style="font-size:0.75rem;color:#7d8590">PG_HOST in /bot/.env overrides rithmic_engine/.env</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">data/bot.db</td><td>SQLite — backtest sessions only<br><span style="font-size:0.75rem;color:#7d8590">Live data comes from PG, not here</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">scripts/</td><td>EOD tools, sync helpers</td></tr>
+      </table>
+    </div>
+
+    <div class="card">
+      <h3 style="font-size:0.9rem;color:#58a6ff;margin-bottom:12px">rithmic_engine/  — C++ source + ops tools</h3>
+      <table class="interface-table">
+        <tr><td style="color:#7d8590;font-size:0.75rem;width:120px">src/</td><td>C++ source for nq_executor<br><span style="font-size:0.75rem;color:#7d8590">Compiled locally, pushed as binary</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">config/live_config.json</td><td>Single JSON config for C++ executor<br><span style="font-size:0.75rem;color:#7d8590">live_config_schema.py validates it (stays local)</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">scripts/</td><td>quality_gate.sh · formula_audit · cross_system_audit<br>config_schema_audit · cpp_build_check · eod_summary</td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">tests/</td><td>157 pytest tests — runs locally only<br><span style="font-size:0.75rem;color:#7d8590">pytest never runs on Oracle</span></td></tr>
+        <tr><td style="color:#7d8590;font-size:0.75rem">deploy/</td><td>nq_executor.service · deploy.sh</td></tr>
+      </table>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="data-flow">
+  <div class="section-label"><span class="tag tag-current">Data Flow</span><h2>Live Session Data Flow</h2></div>
+  <p class="section-desc">How a live trade goes from Rithmic to the UI dashboard.</p>
+
+  <div class="card">
+    <div class="mermaid">
+flowchart LR
+    RITHMIC["Rithmic\nLegendsTrading FCM"]
+
+    subgraph ORACLE["☁️  Oracle VM"]
+        NQE["nq_executor\nC++ binary"]
+        PG[("PostgreSQL\nnq_trades\nnq_session\nnq_position")]
+    end
+
+    subgraph LOCAL["💻  Local Machine"]
+        UI["FastAPI UI\n:8080"]
+        BROWSER["Browser"]
+        TOOLS["ops tools\n(quality gate · tests · deploy)"]
+        BT["backtest / ML\n(SQLite)"]
+    end
+
+    RITHMIC <-->|"ticks · orders · fills"| NQE
+    NQE -->|"libpq INSERT every fill\nnq_position upsert every 5s"| PG
+    PG -->|"psycopg2 SELECT\n/api/position · /api/session · /api/trades"| UI
+    UI --> BROWSER
+    TOOLS -->|"cmake build → rsync binary"| ORACLE
+
+    style NQE fill:#1a2d1a,color:#7ee787
+    style PG fill:#2a1f3a,color:#d2a8ff
+    style UI fill:#1a2040,color:#79c0ff
+    </div>
+  </div>
+
+  <div class="alert alert-yellow" style="margin-top:12px">
+    ⚡ <strong>One thing to do:</strong> Set <code>PG_HOST=&lt;oracle_vm_ip&gt;</code> in <code>/bot/.env</code> to make the live endpoints active. PostgreSQL port 5432 must be reachable from local machine (or use SSH tunnel: <code>ssh -L 5432:localhost:5432 opc@&lt;ip&gt;</code>).
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="modules">
+  <div class="section-label"><span class="tag tag-arch">Modules</span><h2>All Modules</h2></div>
+  <p class="section-desc">Green border = running now. Blue = local Python service. Grey = future.</p>
+  <div class="module-grid">
+
+    <div class="module-card live-card">
+      <div class="mc-header">
+        <span class="mc-icon">⚡</span>
+        <span class="mc-name">nq_executor</span>
+        <span class="mc-lang lang-cpp">C++</span>
+      </div>
+      <div class="mc-where">📍 Oracle VM · systemd service</div>
+      <div class="mc-status status-live">● LIVE</div>
+      <div class="mc-owns">Feed + ORB strategy + order execution + risk limits — all in one binary. Writes every fill to PG. Upserts position every 5s.</div>
+      <div class="mc-interface">IN ← Rithmic · OUT → PG nq_trades / nq_session / nq_position</div>
+    </div>
+
+    <div class="module-card live-card">
+      <div class="mc-header">
+        <span class="mc-icon">🗄️</span>
+        <span class="mc-name">PostgreSQL</span>
+        <span class="mc-lang lang-sql">SQL</span>
+      </div>
+      <div class="mc-where">📍 Oracle VM · postgresql-16.service</div>
+      <div class="mc-status status-live">● LIVE</div>
+      <div class="mc-owns">Single live DB. TimescaleDB extension. Three tables written by C++: nq_trades, nq_session, nq_position. Read directly by UI.</div>
+      <div class="mc-interface">SHARED — C++ writes, Python UI reads</div>
+    </div>
+
+    <div class="module-card live-card">
+      <div class="mc-header">
+        <span class="mc-icon">🖥️</span>
+        <span class="mc-name">ui-service</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local · FastAPI :8080</div>
+      <div class="mc-status status-live">● LIVE</div>
+      <div class="mc-owns">Dashboard. Live position panel reads PG directly. /api/position · /api/session · /api/trades. Backtest history from SQLite.</div>
+      <div class="mc-interface">IN ← PG (live) + SQLite (backtest) · OUT → HTTP</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">📐</span>
+        <span class="mc-name">config + schema</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local (source of truth)</div>
+      <div class="mc-status status-local">◆ LOCAL TOOL</div>
+      <div class="mc-owns">live_config.json is the single config file. Pydantic schema validates all invariants. 6-gate quality_gate.sh runs before every deploy.</div>
+      <div class="mc-interface">FILE → live_config.json pushed to Oracle (JSON only)</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">🔧</span>
+        <span class="mc-name">ops-tools</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local</div>
+      <div class="mc-status status-local">◆ LOCAL TOOL</div>
+      <div class="mc-owns">go_live.py (10 gates) · deploy.sh push · quality_gate.sh (6 gates) · 157 pytest tests · eod_summary · formula_audit.</div>
+      <div class="mc-interface">TOOLING — not a runtime service</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">📊</span>
+        <span class="mc-name">backtest-engine</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local</div>
+      <div class="mc-status status-local">◆ LOCAL TOOL</div>
+      <div class="mc-owns">Historical tick replay with same ORB logic. Kill test suite. Writes sessions to SQLite. ML training data source.</div>
+      <div class="mc-interface">IN ← parquet data · OUT → SQLite sessions</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">🤖</span>
+        <span class="mc-name">ml-service</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local (train) · future: Oracle infer</div>
+      <div class="mc-status status-local">◆ LOCAL TOOL</div>
+      <div class="mc-owns">XGBoost + LightGBM + Ridge ensemble. 74-feature matrix. RL (PPO/SAC) param tuning. Produces model for executor.</div>
+      <div class="mc-interface">OUT → model.pkl · DB ml_scores</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">🔔</span>
+        <span class="mc-name">alert-service</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local (next to build)</div>
+      <div class="mc-status status-future">○ NEXT</div>
+      <div class="mc-owns">Slack/Telegram on fills, halts, EOD P&amp;L. alerts.enabled already in live_config.json. Subscribes to PG NOTIFY or polls nq_trades.</div>
+      <div class="mc-interface">IN ← PG · OUT → Slack/Telegram webhook</div>
+    </div>
+
+    <div class="module-card">
+      <div class="mc-header">
+        <span class="mc-icon">🗂️</span>
+        <span class="mc-name">portfolio-manager</span>
+        <span class="mc-lang lang-python">Python</span>
+      </div>
+      <div class="mc-where">📍 Local (future)</div>
+      <div class="mc-status status-future">○ FUTURE</div>
+      <div class="mc-owns">Multi-instrument aggregate risk. Correlation limits. Combined drawdown cap across MNQ + MES + MYM. Routes signals to per-symbol executors.</div>
+      <div class="mc-interface">IN ← PG aggregate · OUT → config overrides</div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="interfaces">
+  <div class="section-label"><span class="tag tag-contract">Contracts</span><h2>Active Interfaces</h2></div>
+  <p class="section-desc">How modules talk to each other right now.</p>
+  <div class="card">
+    <table class="interface-table">
+      <thead>
+        <tr>
+          <th>Channel</th>
+          <th>Direction</th>
+          <th>Table / Endpoint</th>
+          <th>Key Fields</th>
+          <th>Frequency</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge-pg">PG</span> nq_trades</td>
+          <td>C++ WRITE · UI READ</td>
+          <td><code>nq_trades</code></td>
+          <td><code>trade_date, direction, entry_price, exit_price, pnl_usd, exit_reason, mae_pts, mfe_pts</code></td>
+          <td>On trade close</td>
+        </tr>
+        <tr>
+          <td><span class="badge-pg">PG</span> nq_position</td>
+          <td>C++ WRITE · UI READ</td>
+          <td><code>nq_position</code></td>
+          <td><code>state, direction, entry_price, sl_price, unrealized_pnl_usd, trades_today, last_updated</code></td>
+          <td>Every 5s + on change</td>
+        </tr>
+        <tr>
+          <td><span class="badge-pg">PG</span> nq_session</td>
+          <td>C++ WRITE · UI READ</td>
+          <td><code>nq_session</code></td>
+          <td><code>session_date, daily_pnl_usd, trades_taken, peak_equity, risk_halted, halt_reason</code></td>
+          <td>EOD flush + halt</td>
+        </tr>
+        <tr>
+          <td><span class="badge-rest">REST</span> /api/position</td>
+          <td>UI SERVE · browser READ</td>
+          <td><code>GET /api/position</code></td>
+          <td>Today's row from nq_position</td>
+          <td>On demand (poll)</td>
+        </tr>
+        <tr>
+          <td><span class="badge-rest">REST</span> /api/session</td>
+          <td>UI SERVE · browser READ</td>
+          <td><code>GET /api/session</code></td>
+          <td>Today's row from nq_session</td>
+          <td>On demand</td>
+        </tr>
+        <tr>
+          <td><span class="badge-rest">REST</span> /api/trades</td>
+          <td>UI SERVE · browser READ</td>
+          <td><code>GET /api/trades</code></td>
+          <td>Today's trades from nq_trades, newest first</td>
+          <td>On demand</td>
+        </tr>
+        <tr>
+          <td><span class="badge-file">FILE</span> live_config.json</td>
+          <td>ops WRITE · nq_executor READ</td>
+          <td><code>config/live_config.json</code></td>
+          <td>All trading params · Pydantic-validated on every deploy</td>
+          <td>At deploy time</td>
+        </tr>
+        <tr>
+          <td><span class="badge-file">FILE</span> nq_executor binary</td>
+          <td>cmake BUILD · deploy.sh PUSH</td>
+          <td><code>build/nq_executor</code></td>
+          <td>Compiled C++ · pushed via rsync · no source on Oracle</td>
+          <td>On code change</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="expansion">
+  <div class="section-label"><span class="tag tag-expand">Expansion</span><h2>Growth Paths</h2></div>
+  <p class="section-desc">Each path adds one new module without touching what's already working.</p>
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+    CORE(["⚡ Core — NOW\nMNQ ORB · Legends 50K\nnq_executor on Oracle\nFastAPI UI local"])
+
+    CORE --> A1["🔔 Alerts\nPG NOTIFY → Slack/Telegram\nOn fill · halt · EOD summary\nalerts config already exists\n~1 day"]
+
+    CORE --> A2["📊 Multi-instrument\nMES · MYM alongside MNQ\nNew live_config per symbol\nNew nq_executor instance\n~1 week"]
+
+    CORE --> A3["👥 Multi-account\nLegends 50K × N\nSame signals → N executors\nIsolated risk per account\n~2 weeks"]
+
+    CORE --> A4["🔄 Live→Backtest\nReal fills feed backtester\nAuto regime detection\nTriggers ML retraining\n~3 weeks"]
+
+    A2 --> A5["🗂️ Portfolio Manager\nPython local\nAggregate drawdown cap\nCorrelation limits\n~2 weeks after multi-instrument"]
+
+    A3 --> A5
+
+    style CORE fill:#1c3a6e,color:#79c0ff
+    style A1 fill:#1a2d1a,color:#7ee787
+    style A2 fill:#2a2a10,color:#e3b341
+    style A3 fill:#2a1a2a,color:#d2a8ff
+    style A4 fill:#1a1a2a,color:#79c0ff
+    style A5 fill:#2a1a1a,color:#ff7b72
+    </div>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════════════════════════ -->
+<section id="roadmap">
+  <div class="section-label"><span class="tag tag-arch">Roadmap</span><h2>Priority Order</h2></div>
+  <p class="section-desc">Steps 1 and 2 are done. Each remaining step unblocks the next.</p>
+  <div class="roadmap card" style="padding: 24px;">
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content done">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Oracle deploy — nq_executor.service · C++ binary only</div>
+            <div class="roadmap-desc">Created nq_executor.service. Removed live_trader.service (was running Python that raises NotImplementedError). deploy.sh push now sends binary + JSON config + certs only. Zero Python on Oracle.</div>
+          </div>
+          <div class="effort effort-done">✓ Done</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag roadmap-tag-done">nq_executor.service</span>
+          <span class="roadmap-tag roadmap-tag-done">deploy.sh C++ only</span>
+          <span class="roadmap-tag roadmap-tag-done">live_trader.service removed</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content done">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Live UI reads PostgreSQL directly — no sync script</div>
+            <div class="roadmap-desc">UI /api/position · /api/session · /api/trades endpoints already query Oracle PG directly via psycopg2. Fixed PG_HOST priority (/bot/.env overrides rithmic_engine/.env). Fixed BUG-19 (set_environment was writing wrong trade_route). Deleted misplaced sync_cpp_trades.py.</div>
+          </div>
+          <div class="effort effort-done">✓ Done</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag roadmap-tag-done">direct PG reads</span>
+          <span class="roadmap-tag roadmap-tag-done">BUG-19 fixed</span>
+          <span class="roadmap-tag roadmap-tag-done">sync script removed</span>
+          <span class="roadmap-tag">set PG_HOST in /bot/.env</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num">3</div></div>
+      <div class="roadmap-content">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Unified schema — rename nq_ tables to match /bot models</div>
+            <div class="roadmap-desc">nq_trades → trades · nq_session → sessions · nq_position → position. Update orb_db.hpp INSERT statements and /bot live.py SELECT queries to use same table names. Run ALTER TABLE migration on Oracle PG.</div>
+          </div>
+          <div class="effort">~1 day</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag">orb_db.hpp</span>
+          <span class="roadmap-tag">live.py queries</span>
+          <span class="roadmap-tag">ALTER TABLE migration</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num">4</div></div>
+      <div class="roadmap-content">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Alert service — Slack/Telegram on fills, halts, EOD</div>
+            <div class="roadmap-desc">alerts.enabled is already in live_config.json. Python daemon polls PG for new nq_trades rows (or uses LISTEN/NOTIFY). Posts to Slack webhook on fill, halt, and EOD P&amp;L summary.</div>
+          </div>
+          <div class="effort">~1 day</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag">PG NOTIFY or poll</span>
+          <span class="roadmap-tag">Slack webhook</span>
+          <span class="roadmap-tag">alerts config</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num">5</div></div>
+      <div class="roadmap-content">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Multi-instrument — MES and MYM alongside MNQ</div>
+            <div class="roadmap-desc">Per-symbol live_config files. Each symbol gets its own nq_executor process + systemd unit. OrbConfig already parameterised by symbol. Add per-symbol tables or symbol column to existing schema.</div>
+          </div>
+          <div class="effort">~1 week</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag">per-symbol config</span>
+          <span class="roadmap-tag">3× systemd units</span>
+          <span class="roadmap-tag">symbol column in schema</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num">6</div></div>
+      <div class="roadmap-content">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Portfolio manager — aggregate risk across instruments</div>
+            <div class="roadmap-desc">Python local process. Watches aggregate exposure in PG. Enforces correlation limits and combined drawdown cap. Writes position limit overrides. Runs alongside ui-service.</div>
+          </div>
+          <div class="effort">~2 weeks</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag">Python daemon</span>
+          <span class="roadmap-tag">PG aggregate queries</span>
+          <span class="roadmap-tag">config override</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="roadmap-item">
+      <div class="roadmap-left"><div class="step-num">7</div></div>
+      <div class="roadmap-content">
+        <div style="display:flex;align-items:flex-start">
+          <div>
+            <div class="roadmap-title">Live → Backtest feedback loop</div>
+            <div class="roadmap-desc">Real fills stream into backtester. Regime detector flags when live stats diverge. Triggers ML retraining and go_live re-verification before next session.</div>
+          </div>
+          <div class="effort">~3 weeks</div>
+        </div>
+        <div class="roadmap-tags">
+          <span class="roadmap-tag">regime detection</span>
+          <span class="roadmap-tag">auto retrain trigger</span>
+          <span class="roadmap-tag">backtest feedback</span>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</div><!-- /page -->
+
+<script>
+mermaid.initialize({
+  startOnLoad: true,
+  theme: 'dark',
+  themeVariables: {
+    darkMode: true,
+    background: '#161b22',
+    primaryColor: '#1c3a6e',
+    primaryTextColor: '#e6edf3',
+    primaryBorderColor: '#30363d',
+    lineColor: '#58a6ff',
+    secondaryColor: '#21262d',
+    tertiaryColor: '#0d1117',
+    edgeLabelBackground: '#161b22',
+    clusterBkg: '#1e2430',
+    clusterBorder: '#30363d',
+    titleColor: '#f0f6fc',
+    nodeTextColor: '#e6edf3',
+    labelTextColor: '#e6edf3',
+  },
+  flowchart: { htmlLabels: true, curve: 'basis', padding: 20 }
+});
+
+const sections = document.querySelectorAll('section[id]');
+const navLinks = document.querySelectorAll('.nav a');
+window.addEventListener('scroll', () => {
+  let current = '';
+  sections.forEach(s => { if (window.scrollY >= s.offsetTop - 80) current = s.id; });
+  navLinks.forEach(a => {
+    a.classList.toggle('active', a.getAttribute('href') === '#' + current);
+  });
+}, { passive: true });
+</script>
+</body>
+</html>
