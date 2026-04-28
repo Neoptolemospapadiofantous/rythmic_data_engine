@@ -188,9 +188,15 @@ public:
                     if (order_cb_) {
                         std::string basket = new_basket_id();
                         lat_.on_signal(basket, fill_price, false);
+                        // Legends rejects MARKET orders — use aggressive LIMIT same as entries.
+                        constexpr double TICK = 0.25;
+                        constexpr int    OFFSET_TICKS = 4;
+                        double unwind_px = unwind_is_buy
+                            ? fill_price + OFFSET_TICKS * TICK
+                            : fill_price - OFFSET_TICKS * TICK;
                         bool ok = order_cb_(basket, cfg_.symbol, cfg_.exchange,
-                                            cfg_.qty, /*MARKET=2*/2, unwind_is_buy,
-                                            0.0, "stale_stop_unwind");
+                                            cfg_.qty, /*LIMIT=1*/1, unwind_is_buy,
+                                            unwind_px, "stale_stop_unwind");
                         if (ok) lat_.on_submit(basket, fill_price);
                     }
                 } else {
