@@ -1,6 +1,12 @@
 syntax = "proto3";
 package rti;
 
+// NOTE ON FIELD NUMBERS: All `= NNNNNN` field tags below are Rithmic's own wire
+// field numbers (e.g. 154467 for template_id, 132760 for user_msg).  These are
+// the protobuf binary field tags, NOT the template_id values that identify message
+// types at runtime.  The template_id VALUE (e.g. 310, 311, 312) is set in C++ via
+// req.set_template_id(310) and is what the Base message extracts for routing.
+
 // Base — used to extract template_id from any incoming message
 message Base {
   int32 template_id = 154467;
