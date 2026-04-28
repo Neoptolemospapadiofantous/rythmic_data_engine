@@ -48,8 +48,11 @@ struct TradeLatency {
 // Uses a simple mutex for the pending record.
 class LatencyLogger {
 public:
-    // tick_value: dollars per tick for this instrument (NQ=$5.00, MNQ=$0.50)
-    // Derived from orb_cfg.point_value × NQ_TICK_SIZE (0.25 pts/tick).
+    // tick_value: dollars per tick for this instrument (NQ=$5.00, MNQ=$0.50).
+    // Pass orb_cfg.point_value * NQ_TICK_SIZE from the executor — do NOT rely on
+    // the default when running NQ (the default is MNQ-specific).
+    // MNQ: 2.0 $/pt × 0.25 pt/tick = $0.50/tick ✓
+    // NQ:  20.0 $/pt × 0.25 pt/tick = $5.00/tick ✓
     explicit LatencyLogger(double tick_value = MNQ_TICK_VALUE)
         : tick_value_(tick_value) {}
     // Record signal emission — returns ns timestamp stored
