@@ -308,8 +308,11 @@ struct OrderPlant {
             // for production, queue to a write strand. For now we use a
             // blocking write (acceptable given <1 order/minute cadence).
             ws->write(asio::buffer(wire));
-            LOG("[ORDER_PLANT] RequestNewOrder sent: basket=%s %s %s qty=%d",
-                basket_id.c_str(), is_buy ? "BUY" : "SELL", symbol.c_str(), qty);
+            LOG("[ORDER_PLANT] RequestNewOrder sent: basket=%s %s %s qty=%d "
+                "order_type=%d price=%.2f fcm=%s ib=%s acct=%s route='%s' dur=DAY auto=AUTO",
+                basket_id.c_str(), is_buy ? "BUY" : "SELL", symbol.c_str(), qty,
+                order_type, price, fcm_id.c_str(), ib_id.c_str(), account_id.c_str(),
+                trade_route.c_str());
             return basket_id;
         } catch (std::exception& e) {
             LOG("[ORDER_PLANT] ERROR sending order: %s", e.what());
@@ -620,7 +623,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                                 resp.rp_code().empty() ? "?" : resp.rp_code(0).c_str());
                             co_return;
                         }
-                        LOG("[EXECUTOR] ORDER_PLANT login OK");
+                        LOG("[EXECUTOR] ORDER_PLANT login OK unique_user_id=%s",
+                            resp.unique_user_id().c_str());
                         break;
                     }
                 }
@@ -638,10 +642,50 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             order_plant->account_id  = orb_cfg.account_id;
             order_plant->fcm_id      = orb_cfg.fcm_id;
             order_plant->ib_id       = orb_cfg.ib_id;
-            order_plant->trade_route = orb_cfg.trade_route;
+            order_plant->trade_route = orb_cfg.trade_route;  // fallback; overridden below
             order_plant->connected   = true;
             LOG("[EXECUTOR] ORDER_PLANT connected — live orders enabled (account=%s)",
                 orb_cfg.account_id.c_str());
+
+            // Query available trade routes (tid=310) — discovers the correct route
+            // string for this FCM/account instead of relying on a hardcoded config value.
+            {
+                rti::RequestTradeRoutes tr_req;
+                tr_req.set_template_id(310);
+                tr_req.set_subscribe_for_updates(true);
+                order_plant->ws->write(asio::buffer(proto_frame(tr_req)));
+                LOG("[ORDER_PLANT] Sent RequestTradeRoutes (tid=310)");
+
+                beast::flat_buffer tr_buf;
+                bool route_found = false;
+                for (int i = 0; i < 50; ++i) {
+                    tr_buf.clear();
+                    order_plant->ws->read(tr_buf);
+                    auto pl = proto_strip(beast::buffers_to_string(tr_buf.data()));
+                    rti::Base base; base.ParseFromString(pl);
+                    if (base.template_id() != 311) continue;
+                    rti::ResponseTradeRoutes tr;
+                    tr.ParseFromString(pl);
+                    LOG("[ORDER_PLANT] ResponseTradeRoutes: exch=%s route='%s' "
+                        "status='%s' is_default=%d fcm=%s ib=%s rp=%s",
+                        tr.exchange().c_str(), tr.trade_route().c_str(),
+                        tr.status().c_str(), (int)tr.is_default(),
+                        tr.fcm_id().c_str(), tr.ib_id().c_str(),
+                        tr.rp_code().empty() ? "" : tr.rp_code(0).c_str());
+                    if (tr.exchange() == orb_cfg.exchange && !tr.trade_route().empty()) {
+                        if (!route_found || tr.is_default()) {
+                            order_plant->trade_route = tr.trade_route();
+                            route_found = true;
+                        }
+                    }
+                    if (!tr.rp_code().empty() && tr.rp_code(0) == "0") break;
+                }
+                if (route_found)
+                    LOG("[ORDER_PLANT] Resolved trade_route='%s'", order_plant->trade_route.c_str());
+                else
+                    LOG("[ORDER_PLANT] WARNING: no CME route found — using config fallback '%s'",
+                        order_plant->trade_route.c_str());
+            }
 
             // Subscribe to order updates (template 308 = RequestSubscribeForOrderUpdates).
             // Without this subscription Rithmic will NOT deliver tid=351/352 notifications.
@@ -739,12 +783,13 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 // the authoritative fill (notify_type=15 COMPLETE with total_fill_size>0).
                 rti::RithmicOrderNotification notif;
                 if (!notif.ParseFromString(payload)) continue;
-                LOG("[EXECUTOR] RithmicOrderNotification basket=%s notify_type=%d status=%s "
-                    "avg_fill=%.2f total_fill=%d unfilled=%d is_snap=%d "
+                LOG("[EXECUTOR] RithmicOrderNotification basket=%s orig=%s notify_type=%d status=%s "
+                    "avg_fill=%.2f total_fill=%d unfilled=%d is_snap=%d price=%.2f "
                     "fcm=%s ib=%s acct=%s sym=%s exch=%s user_tag=%s qty=%d",
-                    notif.basket_id().c_str(), (int)notif.notify_type(), notif.status().c_str(),
+                    notif.basket_id().c_str(), notif.original_basket_id().c_str(),
+                    (int)notif.notify_type(), notif.status().c_str(),
                     notif.avg_fill_price(), notif.total_fill_size(), notif.total_unfilled_size(),
-                    (int)notif.is_snapshot(),
+                    (int)notif.is_snapshot(), notif.price(),
                     notif.fcm_id().c_str(), notif.ib_id().c_str(), notif.account_id().c_str(),
                     notif.symbol().c_str(), notif.exchange().c_str(), notif.user_tag().c_str(),
                     notif.quantity());

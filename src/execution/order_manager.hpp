@@ -294,7 +294,7 @@ public:
                     double old_sl = pos_.sl_price;
                     pos_.sl_price = be_sl;
                     LOG("[OM] Trailing activated — SL moved to BE+offset: %.2f", be_sl);
-                    update_stop_order_locked(old_sl, be_sl);
+                    update_stop_order_locked(old_sl, be_sl, current_price);
                 }
             }
         }
@@ -310,7 +310,7 @@ public:
                 double old_sl = pos_.sl_price;
                 pos_.sl_price = trail_sl;
                 LOG("[OM] Trail updated: price=%.2f new_sl=%.2f", current_price, trail_sl);
-                update_stop_order_locked(old_sl, trail_sl);
+                update_stop_order_locked(old_sl, trail_sl, current_price);
             }
         }
     }
@@ -490,8 +490,14 @@ private:
             return;
         }
 
+        // Use aggressive limit instead of market: 4 ticks past signal price.
+        // Legends prop accounts reject market orders; limit with offset fills immediately.
+        constexpr double TICK = 0.25;
+        constexpr int    OFFSET_TICKS = 4;
+        double limit_px = is_buy ? ref_price + OFFSET_TICKS * TICK
+                                 : ref_price - OFFSET_TICKS * TICK;
         bool ok = order_cb_(basket, cfg_.symbol, cfg_.exchange,
-                             cfg_.qty, /*MARKET=2*/2, is_buy, 0.0, user_tag);
+                             cfg_.qty, /*LIMIT=1*/1, is_buy, limit_px, user_tag);
         if (!ok) {
             LOG("[OM] ERROR: order_cb_ returned false for basket=%s", basket.c_str());
             pos_ = Position{};
@@ -520,43 +526,38 @@ private:
         }
     }
 
-    // Modify existing stop in-place to new_sl (called while state_mu_ held).
-    // Uses RequestModifyOrder (atomic trigger_price change at exchange) to eliminate
-    // the cancel-gap window that existed with the old cancel+resubmit approach.
-    // Falls back to cancel+resubmit only if no modify callback is wired.
-    void update_stop_order_locked(double /*old_sl*/, double new_sl) {
+    // Update stop to new_sl via cancel+resubmit (Legends rejects RequestModifyOrder).
+    // Before resubmitting, validates stop is still on the correct side of current_price.
+    // If price has already blown through the new SL, exits immediately instead.
+    void update_stop_order_locked(double /*old_sl*/, double new_sl,
+                                  double current_price = 0.0) {
         if (cfg_.dry_run) {
-            LOG("[OM] [DRY_RUN] Trail: would modify stop to %.2f", new_sl);
+            LOG("[OM] [DRY_RUN] Trail: would update stop to %.2f", new_sl);
             return;
         }
-        if (pos_.basket_id_stop.empty()) {
-            // No live exchange stop — submit a fresh one
-            submit_stop_order_locked(new_sl);
-            return;
-        }
-        if (modify_cb_) {
-            // Prefer server-assigned basket_id for modify (user_tag rejected by some gateways)
-            const std::string& mod_basket = stop_server_basket_.empty()
-                ? pos_.basket_id_stop : stop_server_basket_;
-            LOG("[OM] Trail update: modifying stop %s (server=%s) trigger=%.2f",
-                pos_.basket_id_stop.c_str(), mod_basket.c_str(), new_sl);
-            bool ok = modify_cb_(mod_basket, new_sl);
-            if (ok) {
-                // Modify message sent — wait for exchange response via on_modify_response()
-                pending_modify_     = true;
-                pending_modify_new_sl_ = new_sl;
-            } else {
-                // Send failed — fall back to cancel+immediate resubmit
-                LOG("[OM] Modify send failed — cancel+resubmit at %.2f", new_sl);
-                cancel_stop_locked();
-                submit_stop_order_locked(new_sl);
+        bool is_long = (pos_.state == PosState::LONG);
+
+        // If price already past new SL, no point placing a stop — exit immediately.
+        if (current_price > 0.0) {
+            bool already_hit = is_long ? (current_price <= new_sl)
+                                       : (current_price >= new_sl);
+            if (already_hit) {
+                LOG("[OM] Trail: price=%.2f already past new SL=%.2f — exiting immediately",
+                    current_price, new_sl);
+                pos_.sl_price = new_sl;
+                initiate_exit_locked("stop_loss_trail", current_price);
+                return;
             }
-        } else {
-            // No modify callback configured (shouldn't happen in live mode)
-            LOG("[OM] WARN: no modify callback — cancel+resubmit stop at %.2f", new_sl);
-            cancel_stop_locked();
-            submit_stop_order_locked(new_sl);
         }
+
+        if (pos_.basket_id_stop.empty()) {
+            submit_stop_order_locked(new_sl);
+            return;
+        }
+        LOG("[OM] Trail update: cancel+resubmit stop %s trigger=%.2f",
+            pos_.basket_id_stop.c_str(), new_sl);
+        cancel_stop_locked();
+        submit_stop_order_locked(new_sl);
     }
 
     // Cancel stop without replacing (called while state_mu_ held)

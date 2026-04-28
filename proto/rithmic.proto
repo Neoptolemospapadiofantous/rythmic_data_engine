@@ -164,6 +164,27 @@ message DepthByOrder {
 // Append these to ~/rithmic_engine/proto/rithmic.proto
 // All field numbers are the Rithmic API wire field numbers.
 
+// ── Template 310 — Request Trade Routes ───────────────────────────
+message RequestTradeRoutes {
+  int32  template_id           = 154467;
+  repeated string user_msg     = 132760;
+  bool   subscribe_for_updates = 154352;
+}
+
+// ── Template 311 — Response Trade Routes ──────────────────────────
+message ResponseTradeRoutes {
+  int32  template_id                  = 154467;
+  repeated string user_msg            = 132760;
+  repeated string rq_handler_rp_code  = 132764;
+  repeated string rp_code             = 132766;
+  string fcm_id                       = 154013;
+  string ib_id                        = 154014;
+  string exchange                     = 110101;
+  string trade_route                  = 112016;
+  string status                       = 131407;
+  bool   is_default                   = 154689;
+}
+
 // ── Template 308 — Subscribe For Order Updates ────────────────────
 message RequestSubscribeForOrderUpdates {
   int32 template_id = 154467;
