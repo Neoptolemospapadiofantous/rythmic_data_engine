@@ -754,14 +754,14 @@ flowchart TD
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num" style="background:#1a2040;border-color:#388bfd;color:#388bfd">6</div></div>
-      <div class="roadmap-content" style="border-color:#388bfd">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content" style="border-color:#238636">
         <div style="display:flex;align-items:flex-start">
           <div>
             <div class="roadmap-title">Portfolio manager — aggregate risk across instruments</div>
             <div class="roadmap-desc">Python local daemon. Queries live_sessions + live_position across all (instrument, strategy) pairs. Enforces combined daily loss cap, correlation limits (MNQ+MES highly correlated), and max concurrent exposure. Writes halt signal back to Oracle if aggregate drawdown exceeded.</div>
           </div>
-          <div class="effort" style="color:#388bfd">▶ Next</div>
+          <div class="effort" style="color:#3fb950">✓ Done</div>
         </div>
         <div class="roadmap-tags">
           <span class="roadmap-tag">scripts/portfolio_manager.py</span>
@@ -772,14 +772,14 @@ flowchart TD
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num">7</div></div>
-      <div class="roadmap-content">
+      <div class="roadmap-left"><div class="step-num" style="background:#1a2040;border-color:#388bfd;color:#388bfd">7</div></div>
+      <div class="roadmap-content" style="border-color:#388bfd">
         <div style="display:flex;align-items:flex-start">
           <div>
             <div class="roadmap-title">Live → Backtest feedback loop</div>
             <div class="roadmap-desc">Real fills stream into backtester. Regime detector flags when live stats diverge. Triggers ML retraining and go_live re-verification before next session.</div>
           </div>
-          <div class="effort">~3 weeks</div>
+          <div class="effort" style="color:#388bfd">▶ Next</div>
         </div>
         <div class="roadmap-tags">
           <span class="roadmap-tag">regime detection</span>
