@@ -521,8 +521,10 @@ private:
                                      nullptr,  // all text format
                                      0);       // text result format
         if (!res) {
-            LOG("[ORBDB] PQexecParams returned null: %s", PQerrorMessage(conn_));
-            return;
+            // PQexecParams returns null only on severe OOM or broken connection.
+            // Must throw so callers (e.g. write_trade) don't silently lose data.
+            std::string err = PQerrorMessage(conn_);
+            throw std::runtime_error("[ORBDB] PQexecParams returned null: " + err);
         }
         ExecStatusType status = PQresultStatus(res);
         if (status != PGRES_COMMAND_OK && status != PGRES_TUPLES_OK) {
