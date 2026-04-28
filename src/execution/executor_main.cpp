@@ -16,7 +16,7 @@
         4. Heartbeat timer (30s) on both plants
 
     The order plant connection is a second WS stream using the same protobuf
-    protocol.  RequestNewOrder (314) / RithmicOrderNotification (351, internal acks) /
+    protocol.  RequestNewOrder (312) / RithmicOrderNotification (351, internal acks) /
     ExchangeOrderNotification (352, fills with fill_price) / AccountPnLPositionUpdate (451)
     messages are all defined in rithmic.proto.  Template 308 subscription is sent after
     login to activate fill/reject delivery.
@@ -320,7 +320,7 @@ struct OrderPlant {
         }
     }
 
-    // Send RequestModifyOrder (template 313) — atomically changes stop trigger_price.
+    // Send RequestModifyOrder (template 314) — atomically changes stop trigger_price.
     // Returns true if sent successfully.
     bool send_modify_order(const std::string& basket_id,
                            double new_trigger_price,
