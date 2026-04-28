@@ -3,8 +3,8 @@
     orb_db.hpp — PostgreSQL persistence for NQ ORB execution engine
 
     Schema:
-      nq_trades    — one row per closed trade (entry, exit, PnL, latency)
-      nq_session   — one row per trading day (ORB levels, risk state)
+      live_trades    — one row per closed trade (entry, exit, PnL, latency)
+      live_sessions  — one row per trading day (ORB levels, risk state)
 
     Uses libpq (already a dependency in the existing rithmic_engine).
     Not thread-safe — call from a single writer thread.
@@ -62,7 +62,7 @@ public:
 
         char sql[2048];
         std::snprintf(sql, sizeof(sql),
-            "INSERT INTO nq_trades "
+            "INSERT INTO live_trades"
             "(trade_date, direction, entry_time, exit_time, entry_price, exit_price, "
             " sl_price, qty, pnl_points, pnl_usd, exit_reason, "
             " signal_to_submit_us, submit_to_fill_ms, entry_slippage_ticks, exit_slippage_ticks, "
@@ -106,7 +106,7 @@ public:
                         const std::string& halt_reason) {
         char sql[1024];
         std::snprintf(sql, sizeof(sql),
-            "INSERT INTO nq_session "
+            "INSERT INTO live_sessions"
             "(session_date, orb_high, orb_low, orb_range, trades_taken, "
             " daily_pnl_usd, peak_equity, risk_halted, halt_reason) "
             "VALUES ('%s', %.4f, %.4f, %.4f, %d, %.4f, %.4f, %s, '%s') "
@@ -132,7 +132,7 @@ public:
         }
         char sql[512];
         std::snprintf(sql, sizeof(sql),
-            "INSERT INTO nq_session (session_date, account_equity) "
+            "INSERT INTO live_sessions(session_date, account_equity) "
             "VALUES ('%s', %.4f) "
             "ON CONFLICT (session_date) DO UPDATE SET account_equity=EXCLUDED.account_equity",
             trade_date.c_str(), equity);
@@ -182,7 +182,7 @@ public:
 
         char sql[2048];
         std::snprintf(sql, sizeof(sql),
-            "INSERT INTO nq_position "
+            "INSERT INTO live_position "
             "(session_date, state, direction, entry_price, entry_time, "
             " current_price, unrealized_pnl_pts, unrealized_pnl_usd, "
             " sl_price, orb_high, orb_low, orb_set, "
@@ -231,7 +231,7 @@ public:
     double get_total_pnl() {
         if (!is_connected()) reconnect();
         PGresult* res = PQexec(conn_,
-            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM nq_trades");
+            "SELECT COALESCE(SUM(pnl_usd), 0.0) FROM live_trades");
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
             LOG("[ORBDB] get_total_pnl failed: %s", PQerrorMessage(conn_));
             if (res) PQclear(res);
@@ -248,7 +248,7 @@ public:
         char sql[256];
         std::snprintf(sql, sizeof(sql),
             "SELECT trade_date, direction, entry_price, exit_price, pnl_usd, exit_reason "
-            "FROM nq_trades ORDER BY entry_time DESC LIMIT %d", n);
+            "FROM live_trades ORDER BY entry_time DESC LIMIT %d", n);
 
         PGresult* res = PQexec(conn_, sql);
         if (!res || PQresultStatus(res) != PGRES_TUPLES_OK) {
@@ -273,7 +273,7 @@ public:
 private:
     void ensure_schema() {
         exec(R"(
-            CREATE TABLE IF NOT EXISTS nq_trades (
+            CREATE TABLE IF NOT EXISTS live_trades (
                 id                      BIGSERIAL PRIMARY KEY,
                 trade_date              DATE NOT NULL,
                 direction               TEXT NOT NULL,
@@ -298,13 +298,13 @@ private:
         )");
 
         // Add new columns to existing table if they don't exist yet (idempotent)
-        exec("ALTER TABLE nq_trades ADD COLUMN IF NOT EXISTS mae_pts        DOUBLE PRECISION");
-        exec("ALTER TABLE nq_trades ADD COLUMN IF NOT EXISTS mfe_pts        DOUBLE PRECISION");
-        exec("ALTER TABLE nq_trades ADD COLUMN IF NOT EXISTS trigger_price  DOUBLE PRECISION");
-        exec("ALTER TABLE nq_trades ADD COLUMN IF NOT EXISTS fill_price     DOUBLE PRECISION");
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS mae_pts        DOUBLE PRECISION");
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS mfe_pts        DOUBLE PRECISION");
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS trigger_price  DOUBLE PRECISION");
+        exec("ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS fill_price     DOUBLE PRECISION");
 
         exec(R"(
-            CREATE TABLE IF NOT EXISTS nq_session (
+            CREATE TABLE IF NOT EXISTS live_sessions (
                 session_date    DATE PRIMARY KEY,
                 orb_high        DOUBLE PRECISION,
                 orb_low         DOUBLE PRECISION,
@@ -318,11 +318,11 @@ private:
             )
         )");
 
-        // Add account_equity column to existing nq_session if not present
-        exec("ALTER TABLE nq_session ADD COLUMN IF NOT EXISTS account_equity DOUBLE PRECISION");
+        // Add account_equity column to existing live_sessions if not present
+        exec("ALTER TABLE live_sessions ADD COLUMN IF NOT EXISTS account_equity DOUBLE PRECISION");
 
         exec(R"(
-            CREATE TABLE IF NOT EXISTS nq_position (
+            CREATE TABLE IF NOT EXISTS live_position (
                 id                  SERIAL PRIMARY KEY,
                 session_date        DATE NOT NULL,
                 state               TEXT NOT NULL DEFAULT 'FLAT',
@@ -344,12 +344,12 @@ private:
         )");
 
         exec(R"(
-            CREATE UNIQUE INDEX IF NOT EXISTS nq_position_date_idx
-            ON nq_position(session_date)
+            CREATE UNIQUE INDEX IF NOT EXISTS live_position_date_idx
+            ON live_position(session_date)
         )");
 
-        LOG("[ORBDB] Schema verified (nq_trades: +mae_pts/mfe_pts/trigger_price/fill_price, "
-            "nq_session: +account_equity, nq_position)");
+        LOG("[ORBDB] Schema verified (live_trades: +mae_pts/mfe_pts/trigger_price/fill_price, "
+            "live_sessions: +account_equity, live_position)");
     }
 
     void exec(const char* sql) {

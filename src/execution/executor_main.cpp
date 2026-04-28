@@ -7,7 +7,7 @@
             → OrderManager  → ORDER_PLANT send (or dry_run log)
             → on fill       → OrderManager state machine
             → RiskManager   → halt if limits breached
-            → OrbDB         → nq_trades / nq_session rows written
+            → OrbDB         → live_trades / live_sessions rows written
 
     Connection sequence (mirrors existing rithmic_engine/src/client.cpp):
         1. Connect MD plant WS → system_info → login (TICKER_PLANT) → subscribe NQ
@@ -79,7 +79,7 @@ static std::atomic<bool> g_flatten_requested{false}; // set by signal handler; a
 
 // ─── Position DB write helper ─────────────────────────────────────────────────
 // Reads current state from order_mgr + strategy and issues an UPSERT to
-// nq_position. Safe to call at any frequency — OrbDB::write_position never throws.
+// live_position. Safe to call at any frequency — OrbDB::write_position never throws.
 static void flush_position(OrbDB* db,
                             const std::string& today,
                             const OrderManager& order_mgr,
@@ -838,7 +838,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
     // ── EOD/trail check timer (1-second tick) ─────────────────────────────────
     asio::steady_timer eod_timer(ex);
     auto eod_loop = [&]() -> asio::awaitable<void> {
-        int pos_write_counter = 0;  // flush nq_position every 5 ticks
+        int pos_write_counter = 0;  // flush live_position every 5 ticks
         while (g_running) {
             eod_timer.expires_after(std::chrono::seconds(1));
             co_await eod_timer.async_wait(asio::use_awaitable);

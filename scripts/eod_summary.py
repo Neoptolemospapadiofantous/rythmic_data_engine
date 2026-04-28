@@ -6,7 +6,7 @@ Intended to run at ~16:15 ET daily (after RTH close) via systemd timer or cron,
 independent of whether live_trader.py completed cleanly.
 
 Workflow:
-  1. Sync C++ nq_trades → trades (idempotent, no-op if nq_trades absent)
+  1. Sync C++ live_trades → trades (idempotent, no-op if live_trades absent)
   2. Compute SessionSummary from all trades for today
   3. Write session_summary row (upsert — idempotent if live_trader already wrote it)
 
@@ -17,7 +17,7 @@ Usage:
     python scripts/eod_summary.py                        # process today
     python scripts/eod_summary.py --date 2026-04-22     # backfill a specific date
     python scripts/eod_summary.py --dry-run              # show without writing
-    python scripts/eod_summary.py --no-cpp-sync          # skip nq_trades sync step
+    python scripts/eod_summary.py --no-cpp-sync          # skip live_trades sync step
 """
 from __future__ import annotations
 
@@ -167,7 +167,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--no-cpp-sync", action="store_true",
-        help="Skip the nq_trades → trades sync step",
+        help="Skip the live_trades → trades sync step",
     )
     parser.add_argument(
         "--start-equity", type=float, default=None,
