@@ -658,7 +658,7 @@ flowchart TD
 <!-- ══════════════════════════════════════════════════════════════ -->
 <section id="roadmap">
   <div class="section-label"><span class="tag tag-arch">Roadmap</span><h2>Priority Order</h2></div>
-  <p class="section-desc">Steps 1 and 2 are done. Each remaining step unblocks the next.</p>
+  <p class="section-desc">Steps 1–5 are done. Steps 6 and 7 are in progress.</p>
   <div class="roadmap card" style="padding: 24px;">
 
     <div class="roadmap-item">
@@ -699,73 +699,74 @@ flowchart TD
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num">3</div></div>
-      <div class="roadmap-content">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content done">
         <div style="display:flex;align-items:flex-start">
           <div>
-            <div class="roadmap-title">Unified schema — rename nq_ tables to match /bot models</div>
-            <div class="roadmap-desc">nq_trades → trades · nq_session → sessions · nq_position → position. Update orb_db.hpp INSERT statements and /bot live.py SELECT queries to use same table names. Run ALTER TABLE migration on Oracle PG.</div>
+            <div class="roadmap-title">Unified schema — live_trades · live_sessions · live_position</div>
+            <div class="roadmap-desc">nq_trades → live_trades · nq_session → live_sessions · nq_position → live_position. Updated orb_db.hpp, executor_main.cpp, live.py, cpp_engine.py, sync_cpp_trades.py, and all 3 Next.js API routes. Migration 003 runs ALTER TABLE RENAME on Oracle PG. Schema also gained instrument + strategy columns (Step 5).</div>
           </div>
-          <div class="effort">~1 day</div>
+          <div class="effort effort-done">✓ Done</div>
         </div>
         <div class="roadmap-tags">
-          <span class="roadmap-tag">orb_db.hpp</span>
-          <span class="roadmap-tag">live.py queries</span>
-          <span class="roadmap-tag">ALTER TABLE migration</span>
+          <span class="roadmap-tag roadmap-tag-done">orb_db.hpp</span>
+          <span class="roadmap-tag roadmap-tag-done">live.py · cpp_engine.py</span>
+          <span class="roadmap-tag roadmap-tag-done">migration 003 + 004</span>
         </div>
       </div>
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num">4</div></div>
-      <div class="roadmap-content">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content done">
         <div style="display:flex;align-items:flex-start">
           <div>
-            <div class="roadmap-title">Alert service — Slack/Telegram on fills, halts, EOD</div>
-            <div class="roadmap-desc">alerts.enabled is already in live_config.json. Python daemon polls PG for new nq_trades rows (or uses LISTEN/NOTIFY). Posts to Slack webhook on fill, halt, and EOD P&amp;L summary.</div>
+            <div class="roadmap-title">Alert service — Telegram on fills, halts, EOD</div>
+            <div class="roadmap-desc">scripts/live_alerts.py polls Oracle PG every 5 s. Fires Telegram on new live_trades fill, risk_halted transition, live_position heartbeat stale &gt;120 s, and EOD summary at 16:15 ET. Uses existing python/alerts.py transport (TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID).</div>
           </div>
-          <div class="effort">~1 day</div>
+          <div class="effort effort-done">✓ Done</div>
         </div>
         <div class="roadmap-tags">
-          <span class="roadmap-tag">PG NOTIFY or poll</span>
-          <span class="roadmap-tag">Slack webhook</span>
-          <span class="roadmap-tag">alerts config</span>
+          <span class="roadmap-tag roadmap-tag-done">live_alerts.py daemon</span>
+          <span class="roadmap-tag roadmap-tag-done">Telegram fills + halts + EOD</span>
+          <span class="roadmap-tag roadmap-tag-done">heartbeat watchdog</span>
         </div>
       </div>
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num">5</div></div>
-      <div class="roadmap-content">
+      <div class="roadmap-left"><div class="step-num step-done">✓</div></div>
+      <div class="roadmap-content done">
         <div style="display:flex;align-items:flex-start">
           <div>
-            <div class="roadmap-title">Multi-instrument — MES and MYM alongside MNQ</div>
-            <div class="roadmap-desc">Per-symbol live_config files. Each symbol gets its own nq_executor process + systemd unit. OrbConfig already parameterised by symbol. Add per-symbol tables or symbol column to existing schema.</div>
+            <div class="roadmap-title">Multi-instrument + multi-strategy — MNQ · MES · MYM · ORB</div>
+            <div class="roadmap-desc">instrument + strategy columns added to all three live_* tables. OrbDB constructor tags every row. Composite PKs: (session_date, instrument, strategy). Per-symbol configs: MNQ_config.json · MES_config.json · MYM_config.json. Systemd template nq_executor@.service runs one process per symbol. All cpp_engine.py endpoints and live_alerts.py accept ?instrument= ?strategy= params.</div>
           </div>
-          <div class="effort">~1 week</div>
+          <div class="effort effort-done">✓ Done</div>
         </div>
         <div class="roadmap-tags">
-          <span class="roadmap-tag">per-symbol config</span>
-          <span class="roadmap-tag">3× systemd units</span>
-          <span class="roadmap-tag">symbol column in schema</span>
+          <span class="roadmap-tag roadmap-tag-done">instrument + strategy columns</span>
+          <span class="roadmap-tag roadmap-tag-done">nq_executor@.service template</span>
+          <span class="roadmap-tag roadmap-tag-done">MES · MYM configs</span>
+          <span class="roadmap-tag roadmap-tag-done">migration 004</span>
         </div>
       </div>
     </div>
 
     <div class="roadmap-item">
-      <div class="roadmap-left"><div class="step-num">6</div></div>
-      <div class="roadmap-content">
+      <div class="roadmap-left"><div class="step-num" style="background:#1a2040;border-color:#388bfd;color:#388bfd">6</div></div>
+      <div class="roadmap-content" style="border-color:#388bfd">
         <div style="display:flex;align-items:flex-start">
           <div>
             <div class="roadmap-title">Portfolio manager — aggregate risk across instruments</div>
-            <div class="roadmap-desc">Python local process. Watches aggregate exposure in PG. Enforces correlation limits and combined drawdown cap. Writes position limit overrides. Runs alongside ui-service.</div>
+            <div class="roadmap-desc">Python local daemon. Queries live_sessions + live_position across all (instrument, strategy) pairs. Enforces combined daily loss cap, correlation limits (MNQ+MES highly correlated), and max concurrent exposure. Writes halt signal back to Oracle if aggregate drawdown exceeded.</div>
           </div>
-          <div class="effort">~2 weeks</div>
+          <div class="effort" style="color:#388bfd">▶ Next</div>
         </div>
         <div class="roadmap-tags">
-          <span class="roadmap-tag">Python daemon</span>
-          <span class="roadmap-tag">PG aggregate queries</span>
-          <span class="roadmap-tag">config override</span>
+          <span class="roadmap-tag">scripts/portfolio_manager.py</span>
+          <span class="roadmap-tag">aggregate PG queries</span>
+          <span class="roadmap-tag">cross-instrument halt</span>
         </div>
       </div>
     </div>
