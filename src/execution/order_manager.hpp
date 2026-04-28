@@ -253,6 +253,13 @@ public:
 
             pos_ = Position{};  // back to FLAT
             trade_completed_ = true;
+            // Clear stale-stop unwind state. last_stop_for_unwind_ was set when we
+            // cancelled the exchange stop before sending the market exit. If the old
+            // stop fires after this point the position is already FLAT — without this
+            // clear the stale-stop branch would match the basket and send an unintended
+            // unwind order, effectively re-entering a position.
+            last_stop_for_unwind_.clear();
+            last_stop_was_buy_ = false;
         }
     }
 
