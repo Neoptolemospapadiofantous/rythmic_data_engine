@@ -36,7 +36,7 @@ ExecStartPre=/bin/bash -c \
      { echo "NO_DEPLOY lockfile present — refusing to start %I executor"; exit 1; }'
 
 ExecStart=/home/opc/rithmic_engine/build/nq_executor \
-    /home/opc/rithmic_engine/config/%I_config.json
+    --config /home/opc/rithmic_engine/config/%I_config.json
 
 TimeoutStartSec=90s
 
