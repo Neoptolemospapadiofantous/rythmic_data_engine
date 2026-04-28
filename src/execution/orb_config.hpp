@@ -191,7 +191,13 @@ struct OrbConfig {
         c.exchange       = json_str(text, "exchange",       c.exchange);
         c.point_value    = json_dbl(text, "point_value",    c.point_value);
         c.environment = json_str(text, "environment", c.environment);
-        c.account_id       = json_str(text, "account_id",       c.account_id);
+        // Env var takes precedence so account_id can be managed in .env without touching JSON
+        {
+            const char* acct_env = std::getenv("RITHMIC_LEGENDS_ACCOUNT");
+            c.account_id = acct_env && acct_env[0]
+                         ? std::string(acct_env)
+                         : json_str(text, "account_id", c.account_id);
+        }
         c.fcm_id           = json_str(text, "fcm_id",           c.fcm_id);
         c.ib_id            = json_str(text, "ib_id",            c.ib_id);
         c.trade_route      = json_str(text, "trade_route",      c.trade_route);

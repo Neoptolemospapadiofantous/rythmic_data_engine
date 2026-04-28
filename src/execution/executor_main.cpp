@@ -296,7 +296,7 @@ struct OrderPlant {
         // basket_id field removed from canonical proto; use user_tag for client-side tracking
         req.set_user_tag(basket_id);
         req.set_duration(rti::RequestNewOrder::DAY);
-        req.set_manual_or_auto_select(rti::RequestNewOrder::MANUAL);
+        req.set_manual_or_auto_select(rti::RequestNewOrder::AUTO);
         req.set_trade_route(trade_route);
 
         try {
@@ -739,9 +739,14 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 rti::RithmicOrderNotification notif;
                 if (!notif.ParseFromString(payload)) continue;
                 LOG("[EXECUTOR] RithmicOrderNotification basket=%s notify_type=%d status=%s "
-                    "avg_fill=%.2f total_fill=%d",
+                    "avg_fill=%.2f total_fill=%d unfilled=%d is_snap=%d "
+                    "fcm=%s ib=%s acct=%s sym=%s exch=%s user_tag=%s qty=%d",
                     notif.basket_id().c_str(), (int)notif.notify_type(), notif.status().c_str(),
-                    notif.avg_fill_price(), notif.total_fill_size());
+                    notif.avg_fill_price(), notif.total_fill_size(), notif.total_unfilled_size(),
+                    (int)notif.is_snapshot(),
+                    notif.fcm_id().c_str(), notif.ib_id().c_str(), notif.account_id().c_str(),
+                    notif.symbol().c_str(), notif.exchange().c_str(), notif.user_tag().c_str(),
+                    notif.quantity());
                 // When our stop order reaches the exchange, capture the server basket_id.
                 if (order_mgr.is_stop_basket(notif.user_tag()) && !notif.basket_id().empty()) {
                     order_mgr.set_stop_server_basket(notif.basket_id());
