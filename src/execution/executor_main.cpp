@@ -421,7 +421,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             // Restore actual equity so trailing drawdown baseline matches Legends' records.
             // Without this, peak_equity_ stays at 50000 after profitable prior sessions,
             // and the drawdown cap fires earlier than Legends' rule requires.
-            risk.set_equity(50000.0 + hist_pnl);
+            risk.set_equity(orb_cfg.starting_balance + hist_pnl);
         }
     } catch (std::exception& e) {
         LOG("[EXECUTOR] WARNING: OrbDB failed (%s) — trades will not be persisted", e.what());
@@ -973,8 +973,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             if (db && db->is_connected()) {
                 const auto& sess = strategy.session();
                 try {
-                    // Real account balance = starting equity (50k) + all-time realized P&L
-                    double cur_equity = 50000.0 + risk.total_profit();
+                    double cur_equity = orb_cfg.starting_balance + risk.total_profit();
                     db->upsert_session(today,
                         sess.orb_set ? strategy.orb_high() : 0.0,
                         sess.orb_set ? strategy.orb_low()  : 0.0,

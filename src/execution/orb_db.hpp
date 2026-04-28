@@ -180,12 +180,16 @@ public:
             11, params);
     }
 
-    // ── Update account equity for today's session (called every 60s) ─────────
+    // ── Update account equity for today's session ────────────────────────────
     void write_account_equity(const std::string& trade_date, double equity) {
         if (!is_connected()) {
             reconnect();
             if (!is_connected()) return;
         }
+        // Only log on first write or when value changes by more than $0.01
+        bool should_log = (last_written_equity_ < 0.0 ||
+                           std::abs(equity - last_written_equity_) >= 0.01);
+
         char p4[32];
         snprintf(p4, sizeof(p4), "%.4f", equity);
 
@@ -203,7 +207,10 @@ public:
                 " ON CONFLICT (session_date, instrument, strategy)"
                 " DO UPDATE SET account_equity=EXCLUDED.account_equity",
                 4, params);
-            LOG("[ORBDB] Account equity updated: $%.2f", equity);
+            if (should_log) {
+                LOG("[ORBDB] Account equity updated: $%.2f", equity);
+                last_written_equity_ = equity;
+            }
         } catch (std::exception& e) {
             LOG("[ORBDB] write_account_equity failed: %s", e.what());
         }
@@ -556,4 +563,5 @@ private:
     std::string instrument_;
     std::string strategy_ = "ORB";
     PGconn*     conn_ = nullptr;
+    double      last_written_equity_ = -1.0; // suppress duplicate equity log lines
 };

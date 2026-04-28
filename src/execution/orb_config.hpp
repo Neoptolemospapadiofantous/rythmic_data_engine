@@ -111,6 +111,9 @@ struct OrbConfig {
     std::string ib_id        = "";   // Rithmic IB identifier (usually empty)
     std::string trade_route  = "Rithmic Order Routing";
 
+    // ── Account ───────────────────────────────────────────────────
+    double starting_balance = 50000.0; // actual Rithmic account balance at last sync
+
     // ── Safety ────────────────────────────────────────────────────
     bool dry_run = true;   // true = log signals only, no real orders
 
@@ -191,7 +194,8 @@ struct OrbConfig {
         c.trade_contract = json_str(text, "trade_contract", c.trade_contract);
         c.exchange       = json_str(text, "exchange",       c.exchange);
         c.point_value    = json_dbl(text, "point_value",    c.point_value);
-        c.environment = json_str(text, "environment", c.environment);
+        c.environment       = json_str(text, "environment",       c.environment);
+        c.starting_balance  = json_dbl(text, "starting_balance",  c.starting_balance);
         // Env var takes precedence so account_id can be managed in .env without touching JSON
         {
             const char* acct_env = std::getenv("RITHMIC_LEGENDS_ACCOUNT");

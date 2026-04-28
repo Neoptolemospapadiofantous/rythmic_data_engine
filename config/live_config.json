@@ -1,6 +1,7 @@
 {
   "_comment": "Live trading configuration for MNQ 5-min ORB strategy.",
   "dry_run": false,
+  "starting_balance": 49594.48,
   "symbol": "MNQ",
   "trade_contract": "MNQM6",
   "exchange": "CME",
