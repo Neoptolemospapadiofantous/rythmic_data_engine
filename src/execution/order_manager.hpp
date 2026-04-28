@@ -152,6 +152,14 @@ public:
                     basket_id.c_str(), pos_.basket_id_entry.c_str());
                 return;
             }
+            // Partial-fill guard: fill_qty < qty means the order wasn't fully filled.
+            // Multi-lot partial fills are not supported (position tracking is all-or-nothing).
+            // At qty=1 a partial fill is physically impossible; this is a safety net.
+            if (fill_qty > 0 && fill_qty < pos_.qty) {
+                LOG("[OM] WARN: partial ENTRY fill basket=%s fill_qty=%d expected=%d "
+                    "— treating as full fill; multi-lot partial fills not supported",
+                    basket_id.c_str(), fill_qty, pos_.qty);
+            }
 
             pos_.entry_price       = fill_price;
             pos_.fill_price_actual = fill_price;  // actual fill for slippage calc
@@ -211,6 +219,12 @@ public:
                 pos_.exit_reason = (basket_id == pos_.basket_id_stop)
                     ? "exchange_stop" : "unknown_exit";
                 pos_.state = PosState::PENDING_EXIT;
+            }
+
+            if (fill_qty > 0 && fill_qty < pos_.qty) {
+                LOG("[OM] WARN: partial EXIT fill basket=%s fill_qty=%d expected=%d "
+                    "— treating as full fill; multi-lot partial fills not supported",
+                    basket_id.c_str(), fill_qty, pos_.qty);
             }
 
             pos_.exit_price  = fill_price;
