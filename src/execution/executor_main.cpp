@@ -649,18 +649,31 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
             // Query available trade routes (tid=310) — discovers the correct route
             // string for this FCM/account instead of relying on a hardcoded config value.
+            // subscribe_for_updates=false: one-shot query; ongoing updates would be
+            // unhandled noise in op_loop (no tid=311 case there).
             {
                 rti::RequestTradeRoutes tr_req;
                 tr_req.set_template_id(310);
-                tr_req.set_subscribe_for_updates(true);
-                order_plant->ws->write(asio::buffer(proto_frame(tr_req)));
+                tr_req.set_subscribe_for_updates(false);
+                co_await ws_write(*order_plant->ws, proto_frame(tr_req));
                 LOG("[ORDER_PLANT] Sent RequestTradeRoutes (tid=310)");
 
                 beast::flat_buffer tr_buf;
                 bool route_found = false;
+                // 5-second budget for all route responses; prevents blocking the io_context
+                // if Rithmic is unresponsive (off-hours, network issue).
+                beast::get_lowest_layer(*order_plant->ws).expires_after(
+                    std::chrono::seconds(5));
                 for (int i = 0; i < 50; ++i) {
                     tr_buf.clear();
-                    order_plant->ws->read(tr_buf);
+                    try {
+                        co_await order_plant->ws->async_read(tr_buf, asio::use_awaitable);
+                    } catch (std::exception& e) {
+                        LOG("[ORDER_PLANT] Trade route read timeout/error: %s — "
+                            "using config fallback '%s'",
+                            e.what(), order_plant->trade_route.c_str());
+                        break;
+                    }
                     auto pl = proto_strip(beast::buffers_to_string(tr_buf.data()));
                     rti::Base base; base.ParseFromString(pl);
                     if (base.template_id() != 311) continue;
@@ -678,8 +691,11 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                             route_found = true;
                         }
                     }
+                    // rp_code="0" is the terminal (end-of-list) marker in Rithmic's protocol.
                     if (!tr.rp_code().empty() && tr.rp_code(0) == "0") break;
                 }
+                // Reset timer so subsequent op_loop reads are not affected.
+                beast::get_lowest_layer(*order_plant->ws).expires_never();
                 if (route_found)
                     LOG("[ORDER_PLANT] Resolved trade_route='%s'", order_plant->trade_route.c_str());
                 else
