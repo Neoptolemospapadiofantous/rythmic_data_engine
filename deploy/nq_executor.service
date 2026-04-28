@@ -15,6 +15,8 @@ Documentation=https://github.com/neoptolemospapadiofantous/rithmic_engine
 After=network-online.target postgresql-16.service
 Wants=network-online.target
 Requires=postgresql-16.service
+StartLimitIntervalSec=300s
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -33,7 +35,7 @@ ExecStartPre=/bin/bash -c \
      { echo "NO_DEPLOY lockfile present — refusing to start executor"; exit 1; }'
 
 ExecStart=/home/opc/rithmic_engine/build/nq_executor \
-    /home/opc/rithmic_engine/config/live_config.json
+    --config /home/opc/rithmic_engine/config/live_config.json
 
 # Allow up to 90 s for Rithmic login + market data subscription before marking failed
 TimeoutStartSec=90s
@@ -41,9 +43,6 @@ TimeoutStartSec=90s
 # Restart automatically on crash; NOT on clean exit (trade day end)
 Restart=on-failure
 RestartSec=30s
-# Max 3 restarts in 5 minutes — avoids hammering Rithmic on auth failure
-StartLimitIntervalSec=300s
-StartLimitBurst=3
 
 # Allow up to 30 s on SIGTERM for position flatten + DB session flush
 TimeoutStopSec=30s
@@ -53,7 +52,6 @@ KillMode=process
 KillSignal=SIGTERM
 SendSIGKILL=yes
 FinalKillSignal=SIGKILL
-TimeoutKillSec=60s
 
 # Route stdout/stderr to journald
 StandardOutput=journal
