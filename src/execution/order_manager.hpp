@@ -233,7 +233,7 @@ public:
                          : pos_.entry_price - fill_price;
             pos_.pnl_points = pts;
             pos_.pnl_usd    = pts * cfg_.point_value
-                              - 2.0 * NQ_COMMISSION; // round-turn
+                              - 2.0 * MNQ_COMMISSION; // round-turn
 
             // Cancel the exchange stop order if it wasn't the one that just filled
             if (!pos_.basket_id_stop.empty() && pos_.basket_id_stop != basket_id) {

@@ -15,7 +15,8 @@ namespace fs = std::filesystem;
 
 // ─── Contract constants (tick geometry is same for NQ and MNQ) ───────────────
 inline constexpr double NQ_TICK_SIZE     = 0.25;   // minimum price increment (NQ and MNQ)
-inline constexpr double NQ_COMMISSION    = 2.0;    // $ per side
+inline constexpr double NQ_COMMISSION    = 2.0;    // $ per side (NQ only)
+inline constexpr double MNQ_COMMISSION   = 0.50;   // $ per side (MNQ: exchange+NFA+brokerage)
 // Per-tick dollar values differ by contract: NQ=$5.00, MNQ=$0.50
 inline constexpr double NQ_TICK_VALUE    = 5.00;   // NQ only — do NOT use for MNQ slippage
 inline constexpr double MNQ_TICK_VALUE   = 0.50;   // MNQ = 2.0 $/pt × 0.25 tick
