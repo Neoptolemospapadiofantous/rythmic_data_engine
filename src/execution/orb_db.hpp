@@ -234,6 +234,19 @@ public:
         }
     }
 
+    // ── Write Legends TICKER_PLANT price for comparison ──────────────────────
+    void write_legends_price(const std::string& session_date, double price) {
+        if (!is_connected()) { reconnect(); if (!is_connected()) return; }
+        char sql[256];
+        std::snprintf(sql, sizeof(sql),
+            "UPDATE live_position SET legends_price=%.4f, last_updated=NOW() "
+            "WHERE session_date='%s' AND instrument='%s' AND strategy='%s'",
+            price, session_date.c_str(), instrument_.c_str(), strategy_.c_str());
+        try { exec(sql); } catch (std::exception& e) {
+            LOG("[ORBDB] write_legends_price failed: %s", e.what());
+        }
+    }
+
     // ── Get total historical P&L (for seeding RiskManager on startup) ─────────
     double get_total_pnl() {
         if (!is_connected()) reconnect();
@@ -366,8 +379,9 @@ private:
             )
         )");
 
-        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS instrument TEXT NOT NULL DEFAULT 'MNQ'");
-        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS strategy   TEXT NOT NULL DEFAULT 'ORB'");
+        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS instrument     TEXT NOT NULL DEFAULT 'MNQ'");
+        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS strategy      TEXT NOT NULL DEFAULT 'ORB'");
+        exec("ALTER TABLE live_position ADD COLUMN IF NOT EXISTS legends_price DOUBLE PRECISION");
 
         exec(R"(
             CREATE UNIQUE INDEX IF NOT EXISTS live_position_inst_strat_idx

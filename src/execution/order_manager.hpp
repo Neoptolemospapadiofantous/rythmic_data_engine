@@ -135,11 +135,11 @@ public:
     }
 
     // ── Fill notification from ORDER_PLANT ────────────────────────────────────
-    void on_fill_notification(const std::string& basket_id,
-                               double fill_price,
-                               int fill_qty,
-                               bool is_entry_fill) {
-        std::lock_guard<std::mutex> lk(state_mu_);
+    // Called with state_mu_ already held (dry-run path inside send_market_order)
+    void on_fill_notification_locked(const std::string& basket_id,
+                                     double fill_price,
+                                     int fill_qty,
+                                     bool is_entry_fill) {
 
         if (is_entry_fill) {
             if (pos_.state != PosState::PENDING_ENTRY) {
@@ -234,6 +234,15 @@ public:
             pos_ = Position{};  // back to FLAT
             trade_completed_ = true;
         }
+    }
+
+    // Public entry point — acquires lock then delegates to _locked variant
+    void on_fill_notification(const std::string& basket_id,
+                               double fill_price,
+                               int fill_qty,
+                               bool is_entry_fill) {
+        std::lock_guard<std::mutex> lk(state_mu_);
+        on_fill_notification_locked(basket_id, fill_price, fill_qty, is_entry_fill);
     }
 
     // ── Periodic check: trailing stop and SL hit (call every tick or 1s) ─────
@@ -472,6 +481,7 @@ private:
         if (cfg_.dry_run) {
             LOG("[OM] [DRY_RUN] Would send MKT %s qty=%d basket=%s",
                 is_buy ? "BUY" : "SELL", cfg_.qty, basket.c_str());
+            on_fill_notification_locked(basket, ref_price, cfg_.qty, /*is_entry=*/true);
             return;
         }
 
@@ -586,8 +596,7 @@ private:
         if (cfg_.dry_run) {
             LOG("[OM] [DRY_RUN] Would send MKT %s qty=%d basket=%s",
                 exit_is_buy ? "BUY" : "SELL", pos_.qty, basket.c_str());
-            // Simulate immediate fill at ref_price in dry-run
-            // Caller must call on_fill_notification manually for dry-run simulation
+            on_fill_notification_locked(basket, ref_price, pos_.qty, /*is_entry=*/false);
             return;
         }
 

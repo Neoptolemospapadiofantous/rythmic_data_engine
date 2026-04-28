@@ -88,9 +88,9 @@ struct OrbConfig {
     double      point_value = 2.0;    // $/point: MNQ=2.0, NQ=20.0 — read from config
     std::string environment = "legends"; // "legends" or "paper"
 
-    // ── Rithmic MD connection (AMP — TICKER_PLANT) ────────────────
-    // Legends allows only 1 concurrent session per user; AMP is used
-    // for the separate TICKER_PLANT feed.
+    // ── Rithmic MD connection (AMP — TICKER_PLANT) ───────────────────
+    // MD feed uses AMP credentials. Legends allows only one concurrent
+    // session — using Legends for both plants causes FORCED LOGOUT on MD.
     std::string md_user;
     std::string md_password;
     std::string md_system_name = "Rithmic 01";
@@ -152,13 +152,14 @@ struct OrbConfig {
         if (c.pg_password.empty())
             c.pg_password = env("RITHMIC_PG_PASSWORD", "");
 
-        // Legends credentials for TICKER_PLANT (market data — same server as order plant)
-        c.md_user        = env("RITHMIC_LEGENDS_USER",     "");
-        c.md_password    = env("RITHMIC_LEGENDS_PASSWORD",  "");
-        c.md_system_name = env("RITHMIC_LEGENDS_SYSTEM",   "LegendsTrading");
-        c.md_url         = env("RITHMIC_LEGENDS_URL",       c.md_url.c_str());
+        // AMP credentials for TICKER_PLANT (market data feed only)
+        // AMP and Legends each get their own session — no session conflict.
+        c.md_user        = env("RITHMIC_AMP_USER",     "");
+        c.md_password    = env("RITHMIC_AMP_PASSWORD",  "");
+        c.md_system_name = env("RITHMIC_AMP_SYSTEM",   "Rithmic 01");
+        c.md_url         = env("RITHMIC_AMP_URL",       c.md_url.c_str());
 
-        // Legends credentials for ORDER_PLANT (execution)
+        // Legends credentials for ORDER_PLANT (execution) — prop firm account
         c.rithmic_user        = env("RITHMIC_LEGENDS_USER",     "");
         c.rithmic_password    = env("RITHMIC_LEGENDS_PASSWORD",  "");
         c.rithmic_system_name = env("RITHMIC_LEGENDS_SYSTEM",   "LegendsTrading");

@@ -511,7 +511,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         req.set_user(orb_cfg.md_user);
         req.set_password(orb_cfg.md_password);
         req.set_system_name(orb_cfg.md_system_name);
-        req.set_app_name(orb_cfg.app_name);
+        req.set_app_name(orb_cfg.app_name + "-MD");
         req.set_app_version(orb_cfg.app_version);
         req.set_infra_type(rti::RequestLogin::TICKER_PLANT);
         co_await ws_write(*md_ws, proto_frame(req));
@@ -734,16 +734,47 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 }
 
             } else if (tid == 351) {
-                // RithmicOrderNotification — internal Rithmic acks (OPEN_PENDING, ORDER_SENT_TO_EXCH, etc.)
-                // This does NOT carry fill_price. Log status only.
+                // RithmicOrderNotification — internal acks and, for Legends/paper routing,
+                // the authoritative fill (notify_type=15 COMPLETE with total_fill_size>0).
                 rti::RithmicOrderNotification notif;
                 if (!notif.ParseFromString(payload)) continue;
-                LOG("[EXECUTOR] RithmicOrderNotification basket=%s notify_type=%d status=%s",
-                    notif.basket_id().c_str(), (int)notif.notify_type(), notif.status().c_str());
+                LOG("[EXECUTOR] RithmicOrderNotification basket=%s notify_type=%d status=%s "
+                    "avg_fill=%.2f total_fill=%d",
+                    notif.basket_id().c_str(), (int)notif.notify_type(), notif.status().c_str(),
+                    notif.avg_fill_price(), notif.total_fill_size());
                 // When our stop order reaches the exchange, capture the server basket_id.
-                // RequestModifyOrder must use this ID, not our client user_tag.
                 if (order_mgr.is_stop_basket(notif.user_tag()) && !notif.basket_id().empty()) {
                     order_mgr.set_stop_server_basket(notif.basket_id());
+                }
+                // Legends routing delivers fills as COMPLETE (15) on tid=351 rather than
+                // ExchangeOrderNotification (352). Detect by total_fill_size > 0.
+                if (notif.total_fill_size() > 0 && notif.avg_fill_price() > 0.0) {
+                    const std::string& client_id = notif.user_tag();
+                    bool is_entry = order_mgr.is_entry_basket(client_id);
+                    bool is_stop  = order_mgr.is_stop_basket(client_id);
+                    if (is_entry || is_stop) {
+                        LOG("[EXECUTOR] tid=351 fill detected: client=%s avg_fill=%.2f qty=%d "
+                            "entry=%d stop=%d",
+                            client_id.c_str(), notif.avg_fill_price(),
+                            notif.total_fill_size(), (int)is_entry, (int)is_stop);
+                        order_mgr.on_fill_notification(client_id,
+                                                       notif.avg_fill_price(),
+                                                       notif.total_fill_size(),
+                                                       is_entry && !is_stop);
+                        flush_position(db.get(), today, order_mgr, strategy,
+                                       order_plant->connected, orb_cfg.point_value);
+                    }
+                } else if ((int)notif.notify_type() == 15 && notif.total_fill_size() == 0) {
+                    // COMPLETE with no fill = order cancelled/rejected by routing or risk rules.
+                    const std::string& client_id = notif.user_tag();
+                    if (order_mgr.is_entry_basket(client_id)) {
+                        LOG("[EXECUTOR] tid=351 order CANCELLED (no fill): client=%s status=%s — "
+                            "returning to FLAT (possible pre-market or risk restriction)",
+                            client_id.c_str(), notif.status().c_str());
+                        order_mgr.on_order_rejected(client_id, "cancelled_no_fill");
+                        flush_position(db.get(), today, order_mgr, strategy,
+                                       order_plant->connected, orb_cfg.point_value);
+                    }
                 }
 
             } else if (tid == 352) {
@@ -819,10 +850,12 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             auto ts = std::chrono::system_clock::now().time_since_epoch();
             hb.set_ssboe(static_cast<int32_t>(
                 std::chrono::duration_cast<std::chrono::seconds>(ts).count()));
-            try {
-                co_await ws_write(*md_ws, proto_frame(hb));
-            } catch (...) {
-                LOG("[EXECUTOR] Heartbeat send failed on MD — WS may be closed");
+            if (md_ws) {
+                try {
+                    co_await ws_write(*md_ws, proto_frame(hb));
+                } catch (...) {
+                    LOG("[EXECUTOR] Heartbeat send failed on MD — WS may be closed");
+                }
             }
             // Also heartbeat ORDER_PLANT — Rithmic drops idle connections in ~2 min
             if (order_plant->connected && order_plant->ws) {
@@ -869,6 +902,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             if (db && db->is_connected()) {
                 const auto& sess = strategy.session();
                 try {
+                    // Real account balance = starting equity (50k) + all-time realized P&L
+                    double cur_equity = 50000.0 + risk.total_profit();
                     db->upsert_session(today,
                         sess.orb_set ? strategy.orb_high() : 0.0,
                         sess.orb_set ? strategy.orb_low()  : 0.0,
@@ -877,6 +912,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         risk.peak_equity(),
                         risk.halted(),
                         "");
+                    db->write_account_equity(today, cur_equity);
                 } catch (std::exception& e) {
                     LOG("[EXECUTOR] DB upsert_session failed: %s", e.what());
                     db->reconnect();
@@ -913,10 +949,238 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         }
     };
 
-    // ── Main MD receive loop ───────────────────────────────────────────────────
+    // ── Legends TICKER_PLANT loop (price comparison only) ────────────────────
+    // Connects with Legends credentials to a second TICKER_PLANT session and
+    // writes legends_price to live_position for side-by-side comparison with the
+    // AMP price. Expects FORCED LOGOUTs (Legends allows one session; ORDER_PLANT
+    // holds it), so it reconnects after each kick without disrupting the main loop.
+    // NOTE: co_await must never be inside a catch block (C++20 restriction) —
+    //       errors set a flag, then the timer is awaited outside the catch.
+    auto legends_md_loop = [&]() -> asio::awaitable<void> {
+        while (g_running) {
+            int retry_secs = 0;
+            std::unique_ptr<WsStream> l_ws;
+
+            // ── connect (probe) ──────────────────────────────────────────────
+            try { l_ws = co_await connect_ws(ioc, ssl_ctx, orb_cfg.rithmic_url); }
+            catch (...) { LOG("[LEGENDS_MD] Connect failed"); retry_secs = 1; }
+            if (retry_secs) {
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(retry_secs));
+                co_await t.async_wait(asio::use_awaitable); continue;
+            }
+
+            // ── system info probe ────────────────────────────────────────────
+            try {
+                rti::RequestRithmicSystemInfo req; req.set_template_id(16);
+                co_await ws_write(*l_ws, proto_frame(req));
+                beast::flat_buffer buf;
+                for (;;) {
+                    buf.clear();
+                    co_await l_ws->async_read(buf, asio::use_awaitable);
+                    auto pl = proto_strip(beast::buffers_to_string(buf.data()));
+                    rti::Base b; b.ParseFromString(pl);
+                    if (b.template_id() == 17) break;
+                }
+            } catch (...) { retry_secs = 1; }
+            if (retry_secs) {
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(retry_secs));
+                co_await t.async_wait(asio::use_awaitable); continue;
+            }
+
+            // ── reconnect for login ──────────────────────────────────────────
+            try { l_ws->close(websocket::close_code::normal); } catch (...) {}
+            l_ws.reset();
+            try { l_ws = co_await connect_ws(ioc, ssl_ctx, orb_cfg.rithmic_url); }
+            catch (...) { retry_secs = 1; }
+            if (retry_secs) {
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(retry_secs));
+                co_await t.async_wait(asio::use_awaitable); continue;
+            }
+
+            // ── login ────────────────────────────────────────────────────────
+            bool login_ok = false;
+            try {
+                rti::RequestLogin req;
+                req.set_template_id(10); req.set_template_version("3.9");
+                req.set_user(orb_cfg.rithmic_user);
+                req.set_password(orb_cfg.rithmic_password);
+                req.set_system_name(orb_cfg.rithmic_system_name);
+                req.set_app_name(orb_cfg.app_name);
+                req.set_app_version(orb_cfg.app_version);
+                req.set_infra_type(rti::RequestLogin::TICKER_PLANT);
+                co_await ws_write(*l_ws, proto_frame(req));
+                beast::flat_buffer buf;
+                for (;;) {
+                    buf.clear();
+                    co_await l_ws->async_read(buf, asio::use_awaitable);
+                    auto pl = proto_strip(beast::buffers_to_string(buf.data()));
+                    rti::Base b; b.ParseFromString(pl);
+                    if (b.template_id() == 11) {
+                        rti::ResponseLogin resp; resp.ParseFromString(pl);
+                        login_ok = !resp.rp_code().empty() && resp.rp_code(0) == "0";
+                        break;
+                    }
+                }
+            } catch (...) { login_ok = false; }
+            if (!login_ok) {
+                LOG("[LEGENDS_MD] Login failed — retry in 1s");
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(30));
+                co_await t.async_wait(asio::use_awaitable); continue;
+            }
+            LOG("[LEGENDS_MD] Legends TICKER_PLANT connected");
+
+            // Heartbeat immediately after login
+            try {
+                rti::RequestHeartbeat hb; hb.set_template_id(18);
+                auto ts = std::chrono::system_clock::now().time_since_epoch();
+                hb.set_ssboe(static_cast<int32_t>(
+                    std::chrono::duration_cast<std::chrono::seconds>(ts).count()));
+                co_await ws_write(*l_ws, proto_frame(hb));
+            } catch (...) {}
+
+            // ── subscribe ────────────────────────────────────────────────────
+            bool sub_ok = true;
+            try {
+                rti::RequestMarketDataUpdate sub;
+                sub.set_template_id(100);
+                sub.set_symbol(trade_symbol);
+                sub.set_exchange(orb_cfg.exchange);
+                sub.set_request(rti::RequestMarketDataUpdate::SUBSCRIBE);
+                sub.set_update_bits(1);  // LAST_TRADE
+                co_await ws_write(*l_ws, proto_frame(sub));
+            } catch (...) { sub_ok = false; }
+            if (!sub_ok) {
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(30));
+                co_await t.async_wait(asio::use_awaitable); continue;
+            }
+
+            // ── tick read loop ───────────────────────────────────────────────
+            beast::flat_buffer buf;
+            bool read_err = false;
+            int  delay_after = 0;
+            while (g_running && !read_err) {
+                buf.clear(); read_err = false;
+                try { co_await l_ws->async_read(buf, asio::use_awaitable); }
+                catch (std::exception& e) {
+                    LOG("[LEGENDS_MD] Read error: %s — reconnecting", e.what());
+                    read_err = true; delay_after = 1;
+                }
+                if (read_err) break;
+
+                auto payload = proto_strip(beast::buffers_to_string(buf.data()));
+                rti::Base base; if (!base.ParseFromString(payload)) continue;
+                int tid = base.template_id();
+
+                if (tid == 150) {
+                    rti::LastTrade lt; if (!lt.ParseFromString(payload)) continue;
+                    if (lt.trade_price() <= 0.0 || lt.trade_size() <= 0) continue;
+                    if (db) db->write_legends_price(today, lt.trade_price());
+                } else if (tid == 77) {
+                    LOG("[LEGENDS_MD] FORCED LOGOUT — reconnecting in 30s");
+                    read_err = true; delay_after = 1;
+                } else if (tid == 18) {
+                    rti::ResponseHeartbeat hb_resp; hb_resp.set_template_id(19);
+                    bool hb_ok = true;
+                    try { co_await ws_write(*l_ws, proto_frame(hb_resp)); }
+                    catch (...) { hb_ok = false; }
+                    if (!hb_ok) { read_err = true; delay_after = 1; }
+                }
+            }
+            if (delay_after > 0) {
+                asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(delay_after));
+                co_await t.async_wait(asio::use_awaitable);
+            }
+        }
+    };
+
+    // ── Main MD receive loop (self-reconnecting) ──────────────────────────────
+    // Never co_return on disconnect — reconnects internally so ORDER_PLANT stays
+    // alive. md_ws is reset to nullptr on error; the inner reconnect loop restores
+    // it before the next read.
     auto md_loop = [&]() -> asio::awaitable<void> {
         beast::flat_buffer buf;
         while (g_running) {
+            // ── reconnect if md_ws is down ─────────────────────────────────
+            while (g_running && !md_ws) {
+                LOG("[EXECUTOR] MD: reconnecting...");
+                bool login_ok = false;
+                try {
+                    // system info probe (Rithmic protocol: probe → close → reconnect → login)
+                    {
+                        auto probe = co_await connect_ws(ioc, ssl_ctx, orb_cfg.md_url);
+                        rti::RequestRithmicSystemInfo req; req.set_template_id(16);
+                        co_await ws_write(*probe, proto_frame(req));
+                        beast::flat_buffer rb;
+                        for (;;) {
+                            rb.clear();
+                            co_await probe->async_read(rb, asio::use_awaitable);
+                            auto pl = proto_strip(beast::buffers_to_string(rb.data()));
+                            rti::Base b; b.ParseFromString(pl);
+                            if (b.template_id() == 17) break;
+                        }
+                        try { probe->close(websocket::close_code::normal); } catch (...) {}
+                    }
+                    md_ws = co_await connect_ws(ioc, ssl_ctx, orb_cfg.md_url);
+                    {
+                        rti::RequestLogin req; req.set_template_id(10);
+                        req.set_template_version("3.9");
+                        req.set_user(orb_cfg.md_user);
+                        req.set_password(orb_cfg.md_password);
+                        req.set_system_name(orb_cfg.md_system_name);
+                        req.set_app_name(orb_cfg.app_name + "-MD");
+                        req.set_app_version(orb_cfg.app_version);
+                        req.set_infra_type(rti::RequestLogin::TICKER_PLANT);
+                        co_await ws_write(*md_ws, proto_frame(req));
+                        beast::flat_buffer lb;
+                        for (;;) {
+                            lb.clear();
+                            co_await md_ws->async_read(lb, asio::use_awaitable);
+                            auto pl = proto_strip(beast::buffers_to_string(lb.data()));
+                            rti::Base b; b.ParseFromString(pl);
+                            if (b.template_id() == 11) {
+                                rti::ResponseLogin resp; resp.ParseFromString(pl);
+                                login_ok = !resp.rp_code().empty() && resp.rp_code(0) == "0";
+                                if (!login_ok)
+                                    LOG("[EXECUTOR] MD reconnect: login failed");
+                                break;
+                            }
+                        }
+                    }
+                    if (login_ok) {
+                        // immediate heartbeat required after login
+                        rti::RequestHeartbeat hb; hb.set_template_id(18);
+                        auto ts = std::chrono::system_clock::now().time_since_epoch();
+                        hb.set_ssboe(static_cast<int32_t>(
+                            std::chrono::duration_cast<std::chrono::seconds>(ts).count()));
+                        co_await ws_write(*md_ws, proto_frame(hb));
+                        // re-subscribe to last trade
+                        rti::RequestMarketDataUpdate sub; sub.set_template_id(100);
+                        sub.set_symbol(trade_symbol);
+                        sub.set_exchange(orb_cfg.exchange);
+                        sub.set_request(rti::RequestMarketDataUpdate::SUBSCRIBE);
+                        sub.set_update_bits(1);
+                        co_await ws_write(*md_ws, proto_frame(sub));
+                        LOG("[EXECUTOR] MD reconnect OK — re-subscribed to %s", trade_symbol.c_str());
+                    } else {
+                        try { md_ws->close(websocket::close_code::normal); } catch (...) {}
+                        md_ws.reset();
+                    }
+                } catch (std::exception& e) {
+                    LOG("[EXECUTOR] MD reconnect error: %s", e.what());
+                    if (md_ws) {
+                        try { md_ws->close(websocket::close_code::normal); } catch (...) {}
+                        md_ws.reset();
+                    }
+                }
+                if (!md_ws) {
+                    asio::steady_timer t(ex);
+                    t.expires_after(std::chrono::seconds(5));
+                    co_await t.async_wait(asio::use_awaitable);
+                }
+            }
+            if (!g_running) co_return;
+
+            // ── read one message ───────────────────────────────────────────
             buf.clear();
             bool read_error = false;
             try {
@@ -924,14 +1188,11 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             } catch (std::exception& e) {
                 if (!g_running) co_return;
                 LOG("[EXECUTOR] MD read error: %s — reconnecting", e.what());
+                try { md_ws->close(websocket::close_code::normal); } catch (...) {}
+                md_ws.reset();
                 read_error = true;
             }
-            if (read_error) {
-                asio::steady_timer t(ex);
-                t.expires_after(std::chrono::seconds(5));
-                co_await t.async_wait(asio::use_awaitable);
-                co_return;
-            }
+            if (read_error) continue;  // re-enters reconnect block above
 
             auto payload = proto_strip(beast::buffers_to_string(buf.data()));
             rti::Base base;
@@ -977,8 +1238,10 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 LOG("[EXECUTOR] MD subscription %s (rp_code=%s)",
                     rpc == "0" ? "OK" : "FAILED", rpc.c_str());
             } else if (tid == 77) {
-                // ForcedLogout — server is closing this session
-                LOG("[EXECUTOR] MD: FORCED LOGOUT (tid=77) — server closed MD session");
+                // ForcedLogout — server is closing this session; trigger reconnect
+                LOG("[EXECUTOR] MD: FORCED LOGOUT (tid=77) — reconnecting MD without touching ORDER_PLANT");
+                try { md_ws->close(websocket::close_code::normal); } catch (...) {}
+                md_ws.reset();
             } else if (tid == 11) {
                 LOG("[EXECUTOR] Login response on MD loop (template 11) — ignoring");
             } else {
@@ -990,9 +1253,12 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
     // Run all coroutines concurrently
     // (In a real deployment we'd use parallel_group; for simplicity we spawn
     //  as separate tasks on the same io_context — C++20 coroutines co_spawn)
-    asio::co_spawn(ex, heartbeat_loop(), asio::detached);
-    asio::co_spawn(ex, eod_loop(),       asio::detached);
-    asio::co_spawn(ex, op_loop(),        asio::detached);
+    asio::co_spawn(ex, heartbeat_loop(),  asio::detached);
+    asio::co_spawn(ex, eod_loop(),        asio::detached);
+    asio::co_spawn(ex, op_loop(),         asio::detached);
+    // legends_md_loop disabled — Legends single-session limit causes FORCED LOGOUT
+    // loop that destabilises the main MD (AMP) feed when ORDER_PLANT is active.
+    // asio::co_spawn(ex, legends_md_loop(), asio::detached);
 
     // Seed ORB range from env vars (use after restart when range was lost)
     {
