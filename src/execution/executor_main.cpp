@@ -380,7 +380,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                                    std::string& today,
                                    Position& carried_pos) {
     // ── Component construction ────────────────────────────────────────────────
-    LatencyLogger lat;
+    // tick_value = point_value × tick_size (NQ: 20.0×0.25=$5.00, MNQ: 2.0×0.25=$0.50)
+    LatencyLogger lat(orb_cfg.point_value * NQ_TICK_SIZE);
     OrderManager  order_mgr(orb_cfg, risk, lat);
 
     // ── Reconnect reconciliation (#2) ─────────────────────────────────────────

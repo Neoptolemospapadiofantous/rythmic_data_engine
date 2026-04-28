@@ -10,7 +10,7 @@
       - signal_price  : price at signal time (for slippage calc)
 
     Slippage in ticks = |fill_price - signal_price| / NQ_TICK_SIZE
-    Slippage in USD   = ticks × MNQ_TICK_VALUE ($0.50/tick for MNQ)
+    Slippage in USD   = ticks × tick_value_  (instrument-specific, passed at construction)
     ═══════════════════════════════════════════════════════════════════════════ */
 #include "orb_config.hpp"
 #include "log.hpp"
@@ -48,6 +48,10 @@ struct TradeLatency {
 // Uses a simple mutex for the pending record.
 class LatencyLogger {
 public:
+    // tick_value: dollars per tick for this instrument (NQ=$5.00, MNQ=$0.50)
+    // Derived from orb_cfg.point_value × NQ_TICK_SIZE (0.25 pts/tick).
+    explicit LatencyLogger(double tick_value = MNQ_TICK_VALUE)
+        : tick_value_(tick_value) {}
     // Record signal emission — returns ns timestamp stored
     int64_t on_signal(const std::string& basket_id, double signal_price, bool is_entry) {
         int64_t ts = now_ns();
@@ -81,7 +85,7 @@ public:
         }
         rec.fill_ts_ns = ts;
         rec.fill_price = fill_price;
-        finalize(rec);
+        finalize(rec, tick_value_);
         LOG("[LAT] %s %s signal→submit=%lldus submit→fill=%lldms slippage=%dticks ($%.2f)",
             rec.basket_id.c_str(),
             rec.is_entry ? "ENTRY" : "EXIT",
@@ -96,7 +100,7 @@ public:
     const TradeLatency& last() const { return last_; }
 
 private:
-    static void finalize(TradeLatency& r) {
+    static void finalize(TradeLatency& r, double tick_value) {
         if (r.submit_ts_ns > r.signal_ts_ns)
             r.signal_to_submit_us = (r.submit_ts_ns - r.signal_ts_ns) / 1000;
         if (r.fill_ts_ns > r.submit_ts_ns)
@@ -104,7 +108,7 @@ private:
 
         double diff = std::abs(r.fill_price - r.signal_price);
         r.slippage_ticks = static_cast<int>(std::round(diff / NQ_TICK_SIZE));
-        r.slippage_usd   = r.slippage_ticks * MNQ_TICK_VALUE;
+        r.slippage_usd   = r.slippage_ticks * tick_value;
     }
 
     static int64_t now_ns() {
@@ -112,6 +116,7 @@ private:
             std::chrono::system_clock::now().time_since_epoch()).count();
     }
 
+    double       tick_value_;
     std::mutex   mu_;
     TradeLatency pending_;
     TradeLatency last_;

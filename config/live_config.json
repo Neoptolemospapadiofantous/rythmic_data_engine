@@ -1,5 +1,5 @@
 {
-  "_comment": "Live trading configuration for NQ 15-min ORB strategy.",
+  "_comment": "Live trading configuration for NQ 5-min ORB strategy.",
   "dry_run": false,
   "symbol": "NQ",
   "trade_contract": "NQM6",
