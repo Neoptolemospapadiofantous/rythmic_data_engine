@@ -1,6 +1,6 @@
 -- migrations/001_trades.sql
 -- Creates the unified trades table and session_summary table used by the
--- Python live trader. The C++ engine writes to nq_trades (see orb_db.hpp);
+-- Python live trader. The C++ engine writes to live_trades (see orb_db.hpp);
 -- sync_cpp_trades.py reconciles those rows into trades at EOD.
 --
 -- UP migration (run this to apply):
