@@ -58,9 +58,10 @@ _do_push() {
             "$host:$remote_dir/build/"
     fi
 
-    # 3. Push config and certs — no Python sources
+    # 3. Push config and certs — JSON/cert files only, no Python
     echo "[3/4] Pushing config and certs..."
     rsync -az \
+        --exclude='*.py' --exclude='__pycache__' --exclude='*.pyc' \
         -e "ssh $SSH_OPTS" \
         "$SCRIPT_DIR/config/" \
         "$host:$remote_dir/config/"
