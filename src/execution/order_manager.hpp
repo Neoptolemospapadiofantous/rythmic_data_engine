@@ -529,6 +529,16 @@ private:
     // Update stop to new_sl via cancel+resubmit (Legends rejects RequestModifyOrder).
     // Before resubmitting, validates stop is still on the correct side of current_price.
     // If price has already blown through the new SL, exits immediately instead.
+    //
+    // Race window: between RequestCancelOrder and the cancel ACK, the old stop is still
+    // live on the exchange. If it fires during this window, on_fill_notification_locked
+    // handles it via the existing exit-fill path (pos_.state is still LONG/SHORT, the
+    // basket_id won't match pos_.basket_id_stop which already holds the new basket, so
+    // exit_reason="unknown_exit" and the new stop is cancelled via cancel_stop_locked).
+    // The stale-stop unwind guard (last_stop_for_unwind_) handles the symmetric case
+    // where the fill arrives *after* the position has already gone FLAT.
+    // Net risk: a trailing move can trigger at the old SL level instead of the new one
+    // — effectively a one-trail-step slip. Acceptable given Legends' modify restriction.
     void update_stop_order_locked(double /*old_sl*/, double new_sl,
                                   double current_price = 0.0) {
         if (cfg_.dry_run) {
