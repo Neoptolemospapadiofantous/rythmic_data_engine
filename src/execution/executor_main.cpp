@@ -418,6 +418,10 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         if (today.empty()) {  // only on first startup, not reconnects
             double hist_pnl = db->get_total_pnl();
             risk.seed_total_profit(hist_pnl);
+            // Restore actual equity so trailing drawdown baseline matches Legends' records.
+            // Without this, peak_equity_ stays at 50000 after profitable prior sessions,
+            // and the drawdown cap fires earlier than Legends' rule requires.
+            risk.set_equity(50000.0 + hist_pnl);
         }
     } catch (std::exception& e) {
         LOG("[EXECUTOR] WARNING: OrbDB failed (%s) — trades will not be persisted", e.what());
