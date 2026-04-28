@@ -132,8 +132,10 @@ bash deploy.sh push
 
 The `push` subcommand:
 - rsync's the C++ binary and `config/` to the VM
-- Copies `deploy/live_trader.service` to `/etc/systemd/system/`
-- Runs `systemctl daemon-reload && systemctl restart live_trader`
+- Copies both `deploy/nq_executor.service` and `deploy/nq_executor@.service` to `/etc/systemd/system/`
+- Applies SELinux `chcon -t bin_t` on the binary (required on Oracle Linux 9)
+- Runs `systemctl daemon-reload && systemctl enable nq_executor`
+- Does NOT auto-start — operator must `sudo systemctl start nq_executor` to begin live trading
 
 ---
 
@@ -143,14 +145,14 @@ If deploying fresh (first time on this VM):
 
 ```bash
 ssh opc@<vm-ip>
-sudo systemctl enable live_trader
-sudo systemctl start live_trader
+sudo systemctl enable nq_executor
+sudo systemctl start nq_executor
 ```
 
 For subsequent restarts after a deploy:
 
 ```bash
-sudo systemctl restart live_trader
+sudo systemctl restart nq_executor
 ```
 
 ---
@@ -159,8 +161,8 @@ sudo systemctl restart live_trader
 
 ```bash
 # On the VM
-sudo systemctl status live_trader
-journalctl -u live_trader -f
+sudo systemctl status nq_executor
+journalctl -u nq_executor -f
 
 # Expect within 60s:
 # - "startup complete — entering trading loop"
@@ -184,13 +186,12 @@ The dashboard shows:
 
 **Logs on VM:**
 ```bash
-journalctl -u live_trader -f --output=json | python -c "
+journalctl -u nq_executor -f --output=json | python3 -c "
 import sys, json
 for line in sys.stdin:
     try:
         r = json.loads(line)
-        msg = json.loads(r.get('MESSAGE', '{}'))
-        print(msg.get('ts',''), msg.get('level',''), msg.get('msg',''))
+        print(r.get('MESSAGE', ''))
     except: pass
 "
 ```
@@ -217,16 +218,16 @@ for line in sys.stdin:
 # Via dashboard kill switch (localhost:5050) — triggers emergency flatten
 
 # Or via systemd
-sudo systemctl stop live_trader
+sudo systemctl stop nq_executor
 
 # Or via signal if systemd is unresponsive
-kill -SIGTERM $(cat data/live_trader.pid)
+kill -SIGTERM $(pgrep nq_executor)
 ```
 
-SIGTERM triggers `_emergency_flatten()` in live_trader.py which:
-1. Closes any open position at latest tick price
-2. Writes the session summary to DB
-3. Exits cleanly
+SIGTERM triggers the executor's signal handler which:
+1. Sets g_running=false to exit all coroutines
+2. Sends MARKET SELL to close any open position
+3. Flushes DB session row and exits cleanly
 
 ### Revert to paper mode
 
@@ -242,7 +243,7 @@ with tempfile.NamedTemporaryFile(mode='w', suffix='.tmp', delete=False, dir='con
 os.replace(tmp, 'config/live_config.json')
 print('dry_run set to True')
 "
-sudo systemctl restart live_trader
+sudo systemctl restart nq_executor
 ```
 
 ### Set NO_DEPLOY lockfile (prevent restart)
