@@ -21,11 +21,15 @@ git pull origin main
 echo "==> Building..."
 make -C build nq_executor -j"$(nproc)"
 
+echo "==> Fixing SELinux label (Oracle Linux requires bin_t for systemd execution)..."
+sudo chcon -t bin_t build/nq_executor
+
 echo "==> Installing service unit..."
 sudo cp deploy/nq_executor.service /etc/systemd/system/nq_executor.service
 sudo systemctl daemon-reload
 
-echo "==> Starting service..."
+echo "==> Resetting failed state and starting..."
+sudo systemctl reset-failed nq_executor 2>/dev/null || true
 sudo systemctl enable nq_executor
 sudo systemctl start nq_executor
 
