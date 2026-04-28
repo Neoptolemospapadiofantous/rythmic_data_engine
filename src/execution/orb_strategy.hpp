@@ -104,8 +104,7 @@ public:
         int et_hour, et_min, et_sec;
         utc_micros_to_et(tick.ts_micros, et_hour, et_min, et_sec);
 
-        // Build 1-minute bars
-        int bar_min = et_hour * 60 + et_min;
+        // Build 1-minute bars (UTC epoch minutes drive bar boundaries)
         int cur_epoch_min = static_cast<int>(tick.ts_micros / 1'000'000 / 60);
 
         if (current_bar_.minute_utc < 0) {
