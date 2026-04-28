@@ -28,6 +28,9 @@ WorkingDirectory=/home/opc/rithmic_engine
 # Load credentials from .env (KEY=value format, one per line)
 EnvironmentFile=/home/opc/rithmic_engine/.env
 
+# Explicitly unset test/dev flags that must never fire in production
+UnsetEnvironment=NQ_FIRE_TEST_ORDER
+
 # Hard-block start if the NO_DEPLOY lockfile is present.
 # Remove this file manually after verifying config for the session.
 ExecStartPre=/bin/bash -c \

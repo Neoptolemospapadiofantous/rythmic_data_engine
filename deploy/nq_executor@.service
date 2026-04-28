@@ -30,6 +30,9 @@ WorkingDirectory=/home/opc/rithmic_engine
 # Load credentials from .env (KEY=value format)
 EnvironmentFile=/home/opc/rithmic_engine/.env
 
+# Explicitly unset test/dev flags that must never fire in production
+UnsetEnvironment=NQ_FIRE_TEST_ORDER
+
 # %I is the unescaped instance name (e.g. MNQ, MES, MYM)
 ExecStartPre=/bin/bash -c \
     '[ ! -f /home/opc/rithmic_engine/NO_DEPLOY ] || \
