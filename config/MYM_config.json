@@ -1,5 +1,5 @@
 {
-  "_comment": "Rithmic Test environment overrides \u2014 applied by scripts/use_env.py",
+  "_comment": "Rithmic Paper Trading environment overrides \u2014 applied by scripts/use_env.py",
   "dry_run": true,
   "symbol": "MYM",
   "trade_contract": "MYMM6",
@@ -27,7 +27,7 @@
   "session_open_min": 47,
   "qty": 1,
   "prop_firm": {
-    "name": "Rithmic Test Account",
+    "name": "Rithmic Paper Trading",
     "daily_loss_limit": 2000.0,
     "max_position_size": 5,
     "max_daily_trades": 10,

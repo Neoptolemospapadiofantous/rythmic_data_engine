@@ -1,0 +1,17 @@
+{
+  "_comment": "Rithmic Paper Trading environment overrides — applied by scripts/use_env.py",
+  "rithmic_legends_user": "n.papdiofantous.gaming.moments@gmail.com",
+  "account_id": "",
+  "trade_route": "Rithmic Order Routing",
+  "fcm_id": "",
+  "ib_id": "",
+  "starting_balance": 50000.0,
+  "prop_firm": {
+    "name": "Rithmic Paper Trading",
+    "daily_loss_limit": 2000.0,
+    "max_position_size": 5,
+    "max_daily_trades": 10,
+    "trailing_drawdown_limit": 2500.0,
+    "consistency_rule_pct": 0.3
+  }
+}
