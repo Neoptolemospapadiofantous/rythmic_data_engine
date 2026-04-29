@@ -70,6 +70,11 @@ void TickDB::exec(const char* sql) {
     PQclear(res);
 }
 
+void TickDB::exec_silent(const char* sql) {
+    PGresult* r = PQexec(conn_, sql);
+    if (r) PQclear(r);
+}
+
 // ── ensure_schema ──────────────────────────────────────────────────
 
 void TickDB::ensure_schema() {
@@ -88,52 +93,35 @@ void TickDB::ensure_schema() {
     )");
 
     // Add columns to existing tables (idempotent — safe to run every start)
-    {
-        PGresult* r;
-        r = PQexec(conn_, "ALTER TABLE ticks ADD COLUMN IF NOT EXISTS symbol   VARCHAR(32) NOT NULL DEFAULT 'NQ';");  if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE ticks ADD COLUMN IF NOT EXISTS exchange VARCHAR(32) NOT NULL DEFAULT 'CME';"); if (r) PQclear(r);
-    }
+    exec_silent("ALTER TABLE ticks ADD COLUMN IF NOT EXISTS symbol   VARCHAR(32) NOT NULL DEFAULT 'NQ';");
+    exec_silent("ALTER TABLE ticks ADD COLUMN IF NOT EXISTS exchange VARCHAR(32) NOT NULL DEFAULT 'CME';");
 
     // Create hypertable (idempotent)
-    {
-        PGresult* res = PQexec(conn_,
-            "SELECT create_hypertable('ticks','ts_event',"
-            "  if_not_exists => TRUE, migrate_data => TRUE);");
-        if (res) PQclear(res);
-    }
+    exec_silent(
+        "SELECT create_hypertable('ticks','ts_event',"
+        "  if_not_exists => TRUE, migrate_data => TRUE);");
 
     // Unique index: (symbol, exchange, ts_event, price, size).
     // IF NOT EXISTS makes this a no-op on every normal startup — only builds
     // the index the very first time (or after explicit DROP).
     // Old narrower legacy index (3-col) dropped once on first run.
-    {
-        PGresult* r = PQexec(conn_, "DROP INDEX IF EXISTS idx_ticks_ts_unique;");
-        if (r) PQclear(r);
-    }
+    exec_silent("DROP INDEX IF EXISTS idx_ticks_ts_unique;");
     exec(R"(
         CREATE UNIQUE INDEX IF NOT EXISTS idx_ticks_unique
             ON ticks(symbol, exchange, ts_event, price, size);
     )");
 
     // Compression — non-fatal (requires TimescaleDB; skipped if unavailable)
-    {
-        PGresult* res = PQexec(conn_,
-            "ALTER TABLE ticks SET ("
-            "  timescaledb.compress,"
-            "  timescaledb.compress_orderby = 'ts_event'"
-            ");");
-        if (res) PQclear(res);  // ignore: already set, or TimescaleDB not loaded
-    }
+    exec_silent(
+        "ALTER TABLE ticks SET ("
+        "  timescaledb.compress,"
+        "  timescaledb.compress_orderby = 'ts_event'"
+        ");");
 
     // ── Continuous aggregates (OHLCV bars) ────────────────────────
-    // These require TimescaleDB.  Wrapped in non-throwing PQexec so the
-    // engine still runs on plain PostgreSQL (bars just won't be available).
-    auto ts_exec = [&](const char* sql) {
-        PGresult* r = PQexec(conn_, sql);
-        if (r) PQclear(r);
-    };
-
-    ts_exec(R"(
+    // These require TimescaleDB.  exec_silent() so the engine still runs
+    // on plain PostgreSQL (bars just won't be available).
+    exec_silent(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_1min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -148,7 +136,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_5min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -163,7 +151,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS bars_15min
         WITH (timescaledb.continuous) AS
         SELECT
@@ -188,8 +176,7 @@ void TickDB::ensure_schema() {
             "  schedule_interval => INTERVAL '%s',"
             "  if_not_exists => TRUE);",
             view, bucket, bucket);
-        PGresult* r = PQexec(conn_, sql);
-        if (r) PQclear(r);
+        exec_silent(sql);
     };
     add_policy("bars_1min",  "1 minute");
     add_policy("bars_5min",  "5 minutes");
@@ -210,24 +197,14 @@ void TickDB::ensure_schema() {
             source     VARCHAR(32)      DEFAULT 'amp_rithmic'
         );
     )");
-    {
-        PGresult* res = PQexec(conn_,
-            "SELECT create_hypertable('bbo','ts_event',"
-            "  if_not_exists => TRUE, migrate_data => TRUE);");
-        if (res) PQclear(res);
-    }
-    {
-        PGresult* r = PQexec(conn_,
-            "CREATE INDEX IF NOT EXISTS idx_bbo_ts ON bbo(ts_event DESC);");
-        if (r) PQclear(r);
-    }
-    {
-        // Unique index required for ON CONFLICT DO NOTHING to actually dedup
-        PGresult* r = PQexec(conn_,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_bbo_unique"
-            " ON bbo(symbol, exchange, ts_event);");
-        if (r) PQclear(r);
-    }
+    exec_silent(
+        "SELECT create_hypertable('bbo','ts_event',"
+        "  if_not_exists => TRUE, migrate_data => TRUE);");
+    exec_silent("CREATE INDEX IF NOT EXISTS idx_bbo_ts ON bbo(ts_event DESC);");
+    // Unique index required for ON CONFLICT DO NOTHING to actually dedup
+    exec_silent(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_bbo_unique"
+        " ON bbo(symbol, exchange, ts_event);");
 
     // ── depth_by_order hypertable — L3 MBO event stream ───────────
     exec(R"(
@@ -246,23 +223,14 @@ void TickDB::ensure_schema() {
             source            VARCHAR(32) DEFAULT 'amp_rithmic'
         );
     )");
-    {
-        PGresult* res = PQexec(conn_,
-            "SELECT create_hypertable('depth_by_order','ts_event',"
-            "  if_not_exists => TRUE, migrate_data => TRUE);");
-        if (res) PQclear(res);
-    }
-    {
-        PGresult* r;
-        r = PQexec(conn_,
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_depth_unique"
-            " ON depth_by_order(symbol, exchange, source_ns)"
-            " WHERE source_ns IS NOT NULL;");
-        if (r) PQclear(r);
-        r = PQexec(conn_,
-            "CREATE INDEX IF NOT EXISTS idx_depth_ts ON depth_by_order(ts_event DESC);");
-        if (r) PQclear(r);
-    }
+    exec_silent(
+        "SELECT create_hypertable('depth_by_order','ts_event',"
+        "  if_not_exists => TRUE, migrate_data => TRUE);");
+    exec_silent(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_depth_unique"
+        " ON depth_by_order(symbol, exchange, source_ns)"
+        " WHERE source_ns IS NOT NULL;");
+    exec_silent("CREATE INDEX IF NOT EXISTS idx_depth_ts ON depth_by_order(ts_event DESC);");
 
     // ── Audit log table ────────────────────────────────────────────
     exec(R"(
@@ -278,11 +246,7 @@ void TickDB::ensure_schema() {
         CREATE INDEX IF NOT EXISTS idx_audit_sev ON audit_log(severity, ts DESC);
     )");
     // Add source column if missing (safe migration for existing installs)
-    {
-        PGresult* r = PQexec(conn_,
-            "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS source VARCHAR(32) DEFAULT 'engine';");
-        if (r) PQclear(r);
-    }
+    exec_silent("ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS source VARCHAR(32) DEFAULT 'engine';");
 
     // ── Quality metrics — time-series health snapshots ─────────────
     exec(R"(
@@ -328,20 +292,17 @@ void TickDB::ensure_schema() {
             ON sessions(started_at DESC);
     )");
     // Add columns that may be missing on existing installs (must run BEFORE index creation)
-    {
-        PGresult* r;
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS strategy      VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS report_json   TEXT;");                                     if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_pnl     DOUBLE PRECISION DEFAULT 0.0;");             if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_trades  INTEGER DEFAULT 0;");                        if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS win_rate      DOUBLE PRECISION DEFAULT 0.0;");             if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sharpe        DOUBLE PRECISION;");                         if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_drawdown  DOUBLE PRECISION;");                         if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS profit_factor DOUBLE PRECISION;");                         if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW();");        if (r) PQclear(r);
-        // Index on strategy — safe now that column exists
-        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_sessions_strategy ON sessions(strategy, mode);");                          if (r) PQclear(r);
-    }
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS strategy      VARCHAR(32) NOT NULL DEFAULT 'micro_orb';");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS report_json   TEXT;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_pnl     DOUBLE PRECISION DEFAULT 0.0;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS total_trades  INTEGER DEFAULT 0;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS win_rate      DOUBLE PRECISION DEFAULT 0.0;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS sharpe        DOUBLE PRECISION;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS max_drawdown  DOUBLE PRECISION;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS profit_factor DOUBLE PRECISION;");
+    exec_silent("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW();");
+    // Index on strategy — safe now that column exists
+    exec_silent("CREATE INDEX IF NOT EXISTS idx_sessions_strategy ON sessions(strategy, mode);");
 
     // ── Sentinel alerts — structured anomaly events ────────────────
     exec(R"(
@@ -410,18 +371,15 @@ void TickDB::ensure_schema() {
             ON trade_log(session_id, entry_time);
     )");
     // Add columns that may be missing on existing installs (must run BEFORE index creation)
-    {
-        PGresult* r;
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS strategy   VARCHAR(32) NOT NULL DEFAULT 'micro_orb';"); if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS mode       VARCHAR(16) NOT NULL DEFAULT 'backtest';");  if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS slippage   DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS points     DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS ticks      DOUBLE PRECISION DEFAULT 0.0;");            if (r) PQclear(r);
-        r = PQexec(conn_, "ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();");       if (r) PQclear(r);
-        // Indexes on new columns — safe now that columns exist
-        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_trade_log_strategy ON trade_log(strategy, mode);");                      if (r) PQclear(r);
-        r = PQexec(conn_, "CREATE INDEX IF NOT EXISTS idx_trade_log_entry_time ON trade_log(entry_time DESC);");                   if (r) PQclear(r);
-    }
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS strategy   VARCHAR(32) NOT NULL DEFAULT 'micro_orb';");
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS mode       VARCHAR(16) NOT NULL DEFAULT 'backtest';");
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS slippage   DOUBLE PRECISION DEFAULT 0.0;");
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS points     DOUBLE PRECISION DEFAULT 0.0;");
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS ticks      DOUBLE PRECISION DEFAULT 0.0;");
+    exec_silent("ALTER TABLE trade_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();");
+    // Indexes on new columns — safe now that columns exist
+    exec_silent("CREATE INDEX IF NOT EXISTS idx_trade_log_strategy ON trade_log(strategy, mode);");
+    exec_silent("CREATE INDEX IF NOT EXISTS idx_trade_log_entry_time ON trade_log(entry_time DESC);");
 
     // ── Daily stats — bot writes daily P&L aggregates ───────────────
     // Schema aligned with bot's SQLite daily_stats table
@@ -499,7 +457,7 @@ void TickDB::ensure_schema() {
     )");
 
     // ── Gate-ready SQL views (non-fatal — require sufficient data) ──
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_daily_pnl AS
         SELECT
             trade_date,
@@ -516,7 +474,7 @@ void TickDB::ensure_schema() {
         ORDER BY trade_date;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_equity_curve AS
         SELECT
             entry_time,
@@ -526,7 +484,7 @@ void TickDB::ensure_schema() {
         ORDER BY entry_time;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_loss_limit_status AS
         SELECT
             ll.symbol,
@@ -557,7 +515,7 @@ void TickDB::ensure_schema() {
     )");
 
     // ── Feature store views (require TimescaleDB bars) ──────────────
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE MATERIALIZED VIEW IF NOT EXISTS mv_bar_features_1min AS
         SELECT
             ts,
@@ -578,7 +536,7 @@ void TickDB::ensure_schema() {
         WITH NO DATA;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_regime_labels AS
         SELECT
             ts,
@@ -596,7 +554,7 @@ void TickDB::ensure_schema() {
         WHERE close_ma60 IS NOT NULL;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_walk_forward_windows AS
         SELECT
             w.window_id,
@@ -619,7 +577,7 @@ void TickDB::ensure_schema() {
         ) w;
     )");
 
-    ts_exec(R"(
+    exec_silent(R"(
         CREATE OR REPLACE VIEW v_oot_partition AS
         SELECT
             (SELECT MAX(ts) - INTERVAL '30 days' FROM bars_1min) AS holdout_start,
@@ -942,20 +900,23 @@ void TickDB::write_metrics(const std::vector<QualityMetric>& ms) {
 void TickDB::write_sentinel_alerts(const std::vector<SentinelAlertRow>& alerts) {
     if (alerts.empty()) return;
 
-    std::string sql =
-        "INSERT INTO sentinel_alerts (session_id, check_name, severity, message, value) VALUES ";
-    for (size_t i = 0; i < alerts.size(); ++i) {
-        if (i) sql += ',';
-        auto& a = alerts[i];
-        sql += "(" + std::to_string(a.session_id) + ",'" + a.check_name + "','"
-             + a.severity + "','" + a.message + "'," + std::to_string(a.value) + ")";
-    }
+    const char* sql =
+        "INSERT INTO sentinel_alerts (session_id, check_name, severity, message, value)"
+        " VALUES ($1, $2, $3, $4, $5)";
 
-    PGresult* res = PQexec(conn_, sql.c_str());
-    if (res) {
-        if (PQresultStatus(res) != PGRES_COMMAND_OK)
-            LOG("write_sentinel_alerts error: %s", PQresultErrorMessage(res));
-        PQclear(res);
+    for (auto& a : alerts) {
+        std::string s_sid   = std::to_string(a.session_id);
+        std::string s_value = std::to_string(a.value);
+        const char* params[5] = {
+            s_sid.c_str(), a.check_name.c_str(), a.severity.c_str(),
+            a.message.c_str(), s_value.c_str()
+        };
+        PGresult* res = PQexecParams(conn_, sql, 5, nullptr, params, nullptr, nullptr, 0);
+        if (res) {
+            if (PQresultStatus(res) != PGRES_COMMAND_OK)
+                LOG("write_sentinel_alerts error: %s", PQresultErrorMessage(res));
+            PQclear(res);
+        }
     }
 }
 

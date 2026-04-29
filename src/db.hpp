@@ -143,6 +143,7 @@ public:
 private:
     void ensure_schema();
     void exec(const char* sql);
+    void exec_silent(const char* sql);  // runs SQL, ignores all errors, frees result
 
     // Format int64 microseconds as "YYYY-MM-DD HH:MM:SS.ffffff+00"
     static std::string format_ts(int64_t ts_micros);
