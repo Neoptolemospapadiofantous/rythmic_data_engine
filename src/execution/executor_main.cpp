@@ -465,9 +465,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         }
     );
 
-    // ── MD plant connection ────────────────────────────────────────────────────
-    LOG("[EXECUTOR] Connecting to MD plant: %s", orb_cfg.md_url.c_str());
-
+    // ── SSL context, executor refs, and trade symbol (shared setup) ─────────────
     ssl::context ssl_ctx(ssl::context::tls_client);
     ssl_ctx.load_verify_file("certs/rithmic_ssl_cert_auth_params");
     ssl_ctx.set_verify_mode(ssl::verify_peer);
@@ -475,7 +473,18 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
     auto ex = co_await asio::this_coro::executor;
     asio::io_context& ioc = static_cast<asio::io_context&>(ex.context());
 
+    std::string trade_symbol = orb_cfg.trade_contract.empty() ? orb_cfg.symbol : orb_cfg.trade_contract;
+    order_plant->trade_symbol = trade_symbol;
+    LOG("[EXECUTOR] Trading contract: %s", trade_symbol.c_str());
+
+    // md_ws is only used in WebSocket mode; stays null in SDK mode.
     std::unique_ptr<WsStream> md_ws;
+
+#ifndef USE_RAPI_SDK
+    // ── MD plant connection (WebSocket — skipped when USE_RAPI_SDK is set) ───────
+    // In SDK mode the native R|API+ TCP feed owns the AMP session; opening a
+    // WebSocket session simultaneously triggers a FORCED LOGOUT storm.
+    LOG("[EXECUTOR] Connecting to MD plant: %s", orb_cfg.md_url.c_str());
     try {
         md_ws = co_await connect_ws(ioc, ssl_ctx, orb_cfg.md_url);
         LOG("[EXECUTOR] MD plant WS connected");
@@ -558,11 +567,6 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         }
     }
 
-    // Use configured contract symbol (set trade_contract in config for the front month, e.g. NQM6)
-    std::string trade_symbol = orb_cfg.trade_contract.empty() ? orb_cfg.symbol : orb_cfg.trade_contract;
-    order_plant->trade_symbol = trade_symbol;
-    LOG("[EXECUTOR] Trading contract: %s", trade_symbol.c_str());
-
     // Subscribe to NQ last trade
     {
         rti::RequestMarketDataUpdate req;
@@ -575,6 +579,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         LOG("[EXECUTOR] Subscribed to %s/%s last trade",
             trade_symbol.c_str(), orb_cfg.exchange.c_str());
     }
+#endif  // !USE_RAPI_SDK
 
     // ── ORDER_PLANT connection (live mode only) ───────────────────────────────
     std::unique_ptr<WsStream> op_ws;
