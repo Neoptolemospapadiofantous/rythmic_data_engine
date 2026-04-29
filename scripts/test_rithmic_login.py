@@ -5,14 +5,14 @@ then decodes ResponseLogin to show rp_code and any messages.
 
 Usage:
     python3 scripts/test_rithmic_login.py \
-        --user PAPA121797704102 \
-        --password REDACTED_ROTATE_PASSWORD \
-        --system "Rithmic Paper Trading" \
+        --user <order_user> \
+        --password <order_password> \
+        --system LegendsTrading \
         --plant ORDER_PLANT
 
     # MD plant test (AMP credentials)
     python3 scripts/test_rithmic_login.py \
-        --user neoptolemos.p@amp.com \
+        --user <amp_user> \
         --password <amp_password> \
         --system "Rithmic 01" \
         --plant TICKER_PLANT
