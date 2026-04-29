@@ -257,6 +257,3 @@ class MicroORBStrategy:
 
         return signal
 
-    def _minutes_since_open(self, ts_et: datetime.datetime) -> int:
-        open_dt = datetime.datetime.combine(ts_et.date(), self._rth_open, tzinfo=ET)
-        return int((ts_et - open_dt).total_seconds() // 60)
