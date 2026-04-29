@@ -10,9 +10,10 @@ cmake-build-*/
 CMakeCache.txt
 CMakeFiles/
 *.o
-*.a
 *.so
 compile_commands.json
+# Rithmic SDK static libs (19MB, not in repo — copy from ~/Downloads/RApiPlus.cpp.13.7.0.0)
+sdk/lib/*.a
 
 # Generated protobuf files
 proto/*.pb.cc

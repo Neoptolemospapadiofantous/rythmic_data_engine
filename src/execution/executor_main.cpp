@@ -36,6 +36,9 @@
 #include "risk_manager.hpp"
 #include "latency_logger.hpp"
 #include "orb_db.hpp"
+#ifdef USE_RAPI_SDK
+#include "sdk_md_feed.hpp"
+#endif
 
 // Reuse existing client/db infrastructure
 #include "client.hpp"
@@ -1408,7 +1411,31 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         co_return;
     }
 
+#ifdef USE_RAPI_SDK
+    // ── Native R|API+ TCP market-data feed ───────────────────────────────────
+    // SdkMdFeed::TradePrint() posts ticks into this ASIO executor via
+    // asio::post(), so all strategy/order_mgr calls remain single-threaded.
+    {
+        SdkConnParams sdk_conn = SdkConnParams::from_env();
+        SdkMdFeed sdk_feed(orb_cfg, sdk_conn, ex, strategy, order_mgr);
+        if (!sdk_feed.start()) {
+            LOG("[EXECUTOR] SDK MD feed failed to start — halting");
+            ioc_ref.stop();
+            co_return;
+        }
+        LOG("[SDK_MD] Native R|API+ TCP feed active — MD loop replaced");
+        // Park here: SDK runs in its own thread; heartbeat/eod/op loops keep
+        // the ASIO executor alive.  Stop when g_running is cleared.
+        while (g_running) {
+            asio::steady_timer t(ex);
+            t.expires_after(std::chrono::seconds(1));
+            co_await t.async_wait(asio::use_awaitable);
+        }
+        sdk_feed.stop();
+    }
+#else
     co_await md_loop();
+#endif
 
     carried_pos = order_mgr.position_snapshot();  // preserve state across reconnects (#2)
     LOG("[EXECUTOR] Main loop exited — carried_pos.state=%d", (int)carried_pos.state);

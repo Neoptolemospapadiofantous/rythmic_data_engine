@@ -82,6 +82,10 @@ add_executable(orb_strategy src/orb_strategy_main.cpp)
 target_compile_features(orb_strategy PRIVATE cxx_std_17)
 
 # ── NQ ORB Executor ────────────────────────────────────────────────
+option(USE_RAPI_SDK "Use native Rithmic R|API+ TCP feed for market data (faster, lower latency)" OFF)
+
+set(RAPI_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/sdk")
+
 set(NQ_EXECUTOR_SOURCES
     src/execution/executor_main.cpp
     src/execution/orb_strategy.cpp
@@ -106,6 +110,38 @@ target_link_libraries(nq_executor PRIVATE rithmic_lib)
 target_compile_definitions(nq_executor PRIVATE
     BOOST_ASIO_HAS_CO_AWAIT
 )
+
+if(USE_RAPI_SDK)
+    message(STATUS "USE_RAPI_SDK=ON — linking native Rithmic R|API+ for market data")
+
+    if(NOT EXISTS "${RAPI_SDK_DIR}/lib/libRApiPlus-optimize.a")
+        message(FATAL_ERROR
+            "SDK libs not found at ${RAPI_SDK_DIR}/lib/\n"
+            "Run:  cp ~/Downloads/RApiPlus.cpp.13.7.0.0/13.7.0.0/linux-gnu-4.18-x86_64/lib/*.a sdk/lib/")
+    endif()
+
+    target_compile_definitions(nq_executor PRIVATE USE_RAPI_SDK -DLINUX -D_REENTRANT)
+    target_compile_options(nq_executor PRIVATE
+        -Wno-sign-compare -Wno-write-strings -Wno-deprecated
+        -fno-strict-aliasing
+    )
+    target_include_directories(nq_executor PRIVATE "${RAPI_SDK_DIR}/include")
+    target_link_directories(nq_executor PRIVATE "${RAPI_SDK_DIR}/lib")
+    target_link_libraries(nq_executor PRIVATE
+        RApiPlus-optimize
+        OmneStreamEngine-optimize
+        OmneChannel-optimize
+        OmneEngine-optimize
+        _api-optimize
+        _apipoll-stubs-optimize
+        _kit-optimize
+        ssl                   # bundled static OpenSSL (SDK version)
+        crypto
+        z pthread rt dl
+    )
+else()
+    message(STATUS "USE_RAPI_SDK=OFF — using WebSocket (Boost.Beast) market data feed")
+endif()
 
 # ── Install ────────────────────────────────────────────────────────
 install(TARGETS rithmic_engine DESTINATION bin)
