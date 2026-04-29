@@ -622,6 +622,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 req.set_app_name(orb_cfg.app_name);
                 req.set_app_version(orb_cfg.app_version);
                 req.set_infra_type(rti::RequestLogin::ORDER_PLANT);
+                LOG("[EXECUTOR] ORDER_PLANT Login: user=%s system=%s",
+                    orb_cfg.rithmic_user.c_str(), orb_cfg.rithmic_system_name.c_str());
                 co_await ws_write(*op_ws, proto_frame(req));
 
                 beast::flat_buffer buf;
