@@ -44,6 +44,7 @@ private:
     void flush_metrics();
     void status_log();
     void ensure_db_connected();
+    asio::awaitable<void> status_log_coro();
 
     Config                         cfg_;
     std::unique_ptr<TickDB>        db_;

@@ -4,6 +4,7 @@
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
+#include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <stdexcept>
 
@@ -281,29 +282,32 @@ void Collector::flush_metrics() {
 
 // ── status logging ─────────────────────────────────────────────────
 
-void Collector::status_log() {
-    asio::steady_timer t(ioc_);
-    std::function<void()> schedule = [&] {
+asio::awaitable<void> Collector::status_log_coro() {
+    auto ex = co_await asio::this_coro::executor;
+    asio::steady_timer t(ex);
+    while (running_) {
         t.expires_after(std::chrono::seconds(60));
-        t.async_wait([&](boost::system::error_code ec) {
-            if (ec || !running_) return;
-            try {
-                auto s = db_->summary();
-                LOG("  ticks=%lld  session=%lld  rejected=%lld  bbo=%lld  depth=%lld  alerts=%lld  latest=%s  price=%s",
-                    (long long)s.tick_count,
-                    (long long)session_total_.load(),
-                    (long long)rejected_total_.load(),
-                    (long long)bbo_total_.load(),
-                    (long long)depth_total_.load(),
-                    (long long)sentinel_->alert_count(),
-                    s.latest.c_str(),
-                    s.price ? std::to_string(*s.price).c_str() : "n/a");
-                audit_->flush();
-            } catch (...) {}
-            schedule();
-        });
-    };
-    schedule();
+        boost::system::error_code ec;
+        co_await t.async_wait(asio::redirect_error(use_awaitable, ec));
+        if (ec || !running_) co_return;
+        try {
+            auto s = db_->summary();
+            LOG("  ticks=%lld  session=%lld  rejected=%lld  bbo=%lld  depth=%lld  alerts=%lld  latest=%s  price=%s",
+                (long long)s.tick_count,
+                (long long)session_total_.load(),
+                (long long)rejected_total_.load(),
+                (long long)bbo_total_.load(),
+                (long long)depth_total_.load(),
+                (long long)sentinel_->alert_count(),
+                s.latest.c_str(),
+                s.price ? std::to_string(*s.price).c_str() : "n/a");
+            audit_->flush();
+        } catch (...) {}
+    }
+}
+
+void Collector::status_log() {
+    asio::co_spawn(ioc_, status_log_coro(), asio::detached);
 }
 
 // ── run / stop ─────────────────────────────────────────────────────
