@@ -1054,16 +1054,31 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     }
                 }
                 // Immediate position flush after trade close so UI sees FLAT right away
-                flush_position(db.get(), today, order_mgr, strategy,
-                               order_plant->connected, orb_cfg.point_value);
+                try {
+                    flush_position(db.get(), today, order_mgr, strategy,
+                                   order_plant->connected, orb_cfg.point_value);
+                } catch (std::exception& e) {
+                    LOG("[EXECUTOR] DB flush_position (trade close) failed: %s", e.what());
+                    if (db) db->reconnect();
+                }
                 pos_write_counter = 0;
+            }
+
+            // Attempt DB reconnect if disconnected (avoids prolonged stale-data windows)
+            if (db && !db->is_connected()) {
+                db->reconnect();
             }
 
             // Periodic position flush every 5 seconds
             if (++pos_write_counter >= 5) {
                 pos_write_counter = 0;
-                flush_position(db.get(), today, order_mgr, strategy,
-                               order_plant->connected, orb_cfg.point_value);
+                try {
+                    flush_position(db.get(), today, order_mgr, strategy,
+                                   order_plant->connected, orb_cfg.point_value);
+                } catch (std::exception& e) {
+                    LOG("[EXECUTOR] DB flush_position failed: %s", e.what());
+                    if (db) db->reconnect();
+                }
             }
         }
     };
