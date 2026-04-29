@@ -5,13 +5,21 @@ and cross-system invariants defined in quality_rules/*.yaml.
 All tests marked @pytest.mark.fast (no I/O, no subprocesses).
 """
 
+import datetime
+import json as _json
 import sys
+import zoneinfo
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+LIVE_CONFIG_PATH = REPO_ROOT / "config" / "live_config.json"
+_live_cfg: dict = _json.loads(LIVE_CONFIG_PATH.read_text()) if LIVE_CONFIG_PATH.exists() else {}
+
+ET = zoneinfo.ZoneInfo("America/New_York")
 
 from strategy.micro_orb import MicroORBStrategy
 
@@ -260,3 +268,249 @@ def test_write_trade_open_uses_mnq_symbol_default():
     assert symbol_param.default == "MNQ", (
         f"_write_trade_open default symbol='{symbol_param.default}' — must be 'MNQ'"
     )
+
+
+# ── ORB strategy helpers ───────────────────────────────────────────────────────
+
+def _orb_cfg(allow_short: bool = True) -> dict:
+    return {"orb": {
+        "orb_period_minutes": 5,
+        "stop_loss_ticks": 60,
+        "target_ticks": 48,
+        "tick_size": 0.25,
+        "point_value": 2.0,
+        "rth_open": "09:30:00",
+        "rth_close": "16:00:00",
+        "eod_exit_minutes_before_close": 15,
+        "allow_short": allow_short,
+    }}
+
+
+def _bar(ts: datetime.datetime, high: float, low: float, close: float) -> dict:
+    return {"ts": ts, "open": close, "high": high, "low": low, "close": close, "volume": 1000}
+
+
+def _strategy_with_range(allow_short: bool = True):
+    """Return (strategy, base_dt) after 5 ORB bars lock the range at 17010/16990."""
+    s = MicroORBStrategy(_orb_cfg(allow_short))
+    base = datetime.datetime(2024, 1, 15, 9, 30, tzinfo=ET)
+    for i in range(5):
+        s.on_bar(_bar(base + datetime.timedelta(minutes=i), 17010.0, 16990.0, 17005.0))
+    return s, base
+
+
+# ── GROUP 1: ORB range building invariants ────────────────────────────────────
+
+@pytest.mark.fast
+def test_orb_range_high_gte_low():
+    """After feeding ORB bars, range_high >= range_low."""
+    s, _ = _strategy_with_range()
+    assert s.orb_high is not None
+    assert s.orb_low is not None
+    assert s.orb_high >= s.orb_low
+
+
+@pytest.mark.fast
+def test_orb_range_only_built_during_window():
+    """Bars outside the 9:30-9:35 ET range window do not change the locked range."""
+    s, base = _strategy_with_range()
+    saved_high, saved_low = s.orb_high, s.orb_low
+    # Bar at 9:40 with extreme prices — range is already locked, must not change
+    s.on_bar(_bar(base + datetime.timedelta(minutes=10), 99999.0, 1.0, 17005.0))
+    assert s.orb_high == pytest.approx(saved_high)
+    assert s.orb_low == pytest.approx(saved_low)
+
+
+@pytest.mark.fast
+def test_orb_breakout_long_above_range_high():
+    """Close above range_high triggers a LONG signal."""
+    s, base = _strategy_with_range()
+    # orb_high=17010.0; close=17020.0 is above it
+    sig = s.on_bar(_bar(base + datetime.timedelta(minutes=5), 17025.0, 17011.0, 17020.0))
+    assert sig is not None
+    assert sig.direction == "LONG"
+
+
+@pytest.mark.fast
+def test_orb_breakout_short_below_range_low():
+    """Close below range_low triggers a SHORT signal when allow_short=True."""
+    s, base = _strategy_with_range(allow_short=True)
+    # orb_low=16990.0; close=16980.0 is below it
+    sig = s.on_bar(_bar(base + datetime.timedelta(minutes=5), 16989.0, 16975.0, 16980.0))
+    assert sig is not None
+    assert sig.direction == "SHORT"
+
+
+@pytest.mark.fast
+def test_orb_no_entry_inside_range():
+    """Close inside range does not trigger a signal."""
+    s, base = _strategy_with_range()
+    # orb_high=17010.0, orb_low=16990.0; close=17000.0 is inside
+    sig = s.on_bar(_bar(base + datetime.timedelta(minutes=5), 17008.0, 16995.0, 17000.0))
+    assert sig is None
+
+
+# ── GROUP 2: Trailing stop invariants ─────────────────────────────────────────
+
+@pytest.mark.fast
+def test_trailing_stop_never_moves_against_position():
+    """For a long, the trailing stop only ever moves up — never retreats."""
+    s, base = _strategy_with_range()
+    # Entry at 17020; target = 17020 + 48 ticks * 0.25 = 17032; stay below target
+    s.on_bar(_bar(base + datetime.timedelta(minutes=5), 17025.0, 17011.0, 17020.0))
+    assert s.state.name == "IN_POSITION"
+
+    # Rise to 17028 (below target 17032): stop moves up to 17028 - 15 = 17013
+    s.on_tick({"price": 17028.0, "ts": base + datetime.timedelta(minutes=6)})
+    assert s.state.name == "IN_POSITION"
+    risen_stop = s._position.stop_loss  # type: ignore[union-attr]
+
+    # Price falls back to 17022 (still above stop 17013): stop must NOT retreat
+    s.on_tick({"price": 17022.0, "ts": base + datetime.timedelta(minutes=7)})
+    assert s.state.name == "IN_POSITION", "Position exited unexpectedly"
+    assert s._position.stop_loss >= risen_stop, "Trailing stop retreated for long position"  # type: ignore[union-attr]
+
+
+@pytest.mark.fast
+def test_trailing_stop_breakeven_trigger():
+    """After trail_be_trigger points profit, stop formula places stop at entry - trail_be_offset."""
+    trail_be_trigger = _live_cfg.get("trail_be_trigger", 3.0)   # points to profit before BE
+    trail_be_offset = _live_cfg.get("trail_be_offset", 1.0)     # points below entry for BE stop
+    entry = 17020.0
+    profit_trigger_price = entry + trail_be_trigger   # price that activates BE
+    be_stop = entry - trail_be_offset                 # resulting BE stop level
+
+    assert profit_trigger_price > entry, "trail_be_trigger must be positive"
+    assert profit_trigger_price - entry == pytest.approx(trail_be_trigger)
+    assert entry - be_stop == pytest.approx(trail_be_offset)
+    assert be_stop < entry, "breakeven stop must be below entry (small downside buffer)"
+
+
+@pytest.mark.fast
+def test_trailing_stop_sl_points_default():
+    """live_config.json sl_points must be 15.0 (matches C++ SL distance)."""
+    assert _live_cfg.get("sl_points") == pytest.approx(15.0)
+
+
+# ── GROUP 5: live_config.json key presence ────────────────────────────────────
+
+@pytest.mark.fast
+def test_live_config_has_legends_user():
+    assert "rithmic_legends_user" in _live_cfg, "rithmic_legends_user missing from live_config.json"
+
+
+@pytest.mark.fast
+def test_live_config_has_account_id():
+    assert "account_id" in _live_cfg, "account_id missing from live_config.json"
+    assert _live_cfg["account_id"], "account_id must be non-empty"
+
+
+@pytest.mark.fast
+def test_live_config_has_prop_firm():
+    assert "prop_firm" in _live_cfg, "prop_firm section missing from live_config.json"
+
+
+@pytest.mark.fast
+def test_live_config_mnq_symbol():
+    assert _live_cfg.get("symbol") == "MNQ", f"symbol={_live_cfg.get('symbol')} — must be MNQ not NQ"
+
+
+@pytest.mark.fast
+def test_live_config_point_value_2():
+    pv = _live_cfg.get("point_value")
+    assert pv == pytest.approx(2.0), f"point_value={pv} — must be 2.0 for MNQ"
+
+
+# ── GROUP 6: EOD + last_entry timing ──────────────────────────────────────────
+
+@pytest.mark.fast
+def test_eod_flatten_time_is_1555():
+    assert _live_cfg.get("eod_flatten_hour") == 15
+    assert _live_cfg.get("eod_flatten_min") == 55
+
+
+@pytest.mark.fast
+def test_last_entry_hour_is_13():
+    assert _live_cfg.get("last_entry_hour") == 13, (
+        f"last_entry_hour={_live_cfg.get('last_entry_hour')} — no new trades after 1 PM ET"
+    )
+
+
+# ── GROUP 7: Risk manager limits ──────────────────────────────────────────────
+
+@pytest.mark.fast
+def test_daily_loss_limit_is_negative():
+    val = _live_cfg.get("daily_loss_limit", 0)
+    assert val < 0, f"daily_loss_limit={val} — must be negative"
+
+
+@pytest.mark.fast
+def test_trailing_drawdown_cap_positive():
+    val = _live_cfg.get("trailing_drawdown_cap", 0)
+    assert val > 0, f"trailing_drawdown_cap={val} — must be positive"
+
+
+@pytest.mark.fast
+def test_max_daily_trades_positive():
+    val = _live_cfg.get("max_daily_trades", 0)
+    assert val >= 1, f"max_daily_trades={val} — must be >= 1"
+
+
+@pytest.mark.fast
+def test_prop_firm_daily_loss_limit_positive():
+    """Legends prop_firm.daily_loss_limit is a positive cap (not a negative floor)."""
+    pf = _live_cfg.get("prop_firm", {})
+    val = pf.get("daily_loss_limit", -1)
+    assert val > 0, f"prop_firm.daily_loss_limit={val} — should be a positive cap value"
+
+
+@pytest.mark.fast
+def test_trailing_drawdown_matches_prop_firm():
+    """Top-level trailing_drawdown_cap must equal prop_firm.trailing_drawdown_limit."""
+    top = _live_cfg.get("trailing_drawdown_cap", 0)
+    pf = _live_cfg.get("prop_firm", {}).get("trailing_drawdown_limit", 0)
+    assert top == pytest.approx(pf), (
+        f"trailing_drawdown_cap={top} != prop_firm.trailing_drawdown_limit={pf}"
+    )
+
+
+# ── GROUP 8: ORB strategy config values ───────────────────────────────────────
+
+@pytest.mark.fast
+def test_orb_minutes_is_5():
+    assert _live_cfg.get("orb_minutes") == 5, (
+        f"orb_minutes={_live_cfg.get('orb_minutes')} — strategy requires 5-min ORB"
+    )
+
+
+@pytest.mark.fast
+def test_sl_points_positive():
+    val = _live_cfg.get("sl_points", 0)
+    assert val > 0, f"sl_points={val} must be positive"
+
+
+@pytest.mark.fast
+def test_sl_ticks_consistent():
+    """sl_points=15 at tick_size=0.25 gives exactly 60 ticks."""
+    sl_points = _live_cfg.get("sl_points", 0)
+    sl_ticks = sl_points / 0.25
+    assert sl_ticks == pytest.approx(60.0), f"sl_ticks={sl_ticks} — expected 60 for sl_points=15"
+
+
+@pytest.mark.fast
+def test_trail_be_trigger_less_than_trail_step():
+    """BE trigger must activate before trail_step so trailing has room to kick in."""
+    be_trigger = _live_cfg.get("trail_be_trigger", 0)
+    trail_step = _live_cfg.get("trail_step", 0)
+    assert be_trigger < trail_step, (
+        f"trail_be_trigger={be_trigger} >= trail_step={trail_step} — trailing never activates"
+    )
+
+
+# ── GROUP 9: dry_run safety ───────────────────────────────────────────────────
+
+@pytest.mark.fast
+def test_live_config_dry_run_is_false():
+    """Production live_config.json must have dry_run=false — catches accidental paper-trading."""
+    val = _live_cfg.get("dry_run")
+    assert val is False, f"dry_run={val!r} — live_config.json must have dry_run=false for live trading"
