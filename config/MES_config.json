@@ -1,19 +1,18 @@
 {
-  "_comment": "MES (Micro E-mini S&P 500) ORB config. Mirrors MNQ structure — set dry_run=false via go_live.py only.",
+  "_comment": "Rithmic Test environment overrides \u2014 applied by scripts/use_env.py",
   "dry_run": true,
   "symbol": "MES",
   "trade_contract": "MESM6",
   "exchange": "CME",
   "point_value": 5.0,
   "account_id": "LTARAPAPA503900216181",
-  "trade_route": "simulator",
+  "trade_route": "Rithmic Order Routing",
   "fcm_id": "LegendsTrading",
   "ib_id": "LegendsTrading",
-
   "_cpp_executor_params": "flat fields below are read by C++ parser",
   "daily_loss_limit": -2000.0,
   "trailing_drawdown_cap": 2500.0,
-  "consistency_cap_pct": 0.30,
+  "consistency_cap_pct": 0.3,
   "orb_minutes": 5,
   "sl_points": 15.0,
   "trail_step": 10.0,
@@ -28,10 +27,10 @@
   "session_open_min": 47,
   "qty": 1,
   "prop_firm": {
-    "name": "Legends 50K Master",
+    "name": "Rithmic Test Account",
     "daily_loss_limit": 2000.0,
-    "max_position_size": 3,
-    "max_daily_trades": 3,
+    "max_position_size": 5,
+    "max_daily_trades": 10,
     "trailing_drawdown_limit": 2500.0,
     "consistency_rule_pct": 0.3
   },
@@ -61,5 +60,7 @@
     "log_level": "INFO",
     "log_trades_to_db": true,
     "log_ticks": false
-  }
+  },
+  "rithmic_legends_user": "n.papdiofantous.gaming.moments@gmail.com",
+  "starting_balance": 50000.0
 }
