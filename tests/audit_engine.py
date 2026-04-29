@@ -631,7 +631,7 @@ def check_config() -> bool:
         ("RITHMIC_LEGENDS_PASSWORD", "non-empty"),
         ("RITHMIC_LEGENDS_SYSTEM",  None),
         ("RITHMIC_LEGENDS_URL",     None),
-        ("RITHMIC_LEGENDS_ACCOUNT", None),
+        ("RITHMIC_LEGENDS_ACCOUNT", "optional"),   # empty in test env, set in live env
         ("RITHMIC_APP_NAME",        None),
         ("RITHMIC_APP_VERSION",     None),
         ("RITHMIC_SYMBOL",          "NQ"),
@@ -649,11 +649,16 @@ def check_config() -> bool:
     for key, expected in required_keys:
         val = env_vals.get(key) or os.environ.get(key, "")
         if not val:
-            result(f"  {key}", FAIL, "not set")
-            ok = False
+            if expected == "optional":
+                result(f"  {key}", WARN, "empty (normal in test env)")
+            else:
+                result(f"  {key}", FAIL, "not set")
+                ok = False
             continue
 
-        if expected == "numeric":
+        if expected == "optional":
+            result(f"  {key}", PASS, val)
+        elif expected == "numeric":
             if not val.isdigit():
                 result(f"  {key}", FAIL, f"value '{val}' is not numeric")
                 ok = False
