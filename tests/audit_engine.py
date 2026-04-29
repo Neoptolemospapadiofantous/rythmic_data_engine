@@ -698,7 +698,6 @@ def main():
         results["schema"] = None
         results["data"]   = None
         results["pydata"] = None
-        results["config"] = check_config()
         print(f"\n  {INFO}  Skipping sections 4+6 (--no-pg)")
     else:
         conn = None

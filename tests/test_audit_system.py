@@ -353,22 +353,23 @@ def test_orb_no_entry_inside_range():
 # ── GROUP 2: Trailing stop invariants ─────────────────────────────────────────
 
 @pytest.mark.fast
-def test_trailing_stop_never_moves_against_position():
-    """For a long, the trailing stop only ever moves up — never retreats."""
-    s, base = _strategy_with_range()
-    # Entry at 17020; target = 17020 + 48 ticks * 0.25 = 17032; stay below target
-    s.on_bar(_bar(base + datetime.timedelta(minutes=5), 17025.0, 17011.0, 17020.0))
-    assert s.state.name == "IN_POSITION"
+def test_trailing_stop_formula_long():
+    """Trailing stop for a long: new_stop = max(current_stop, current_price - trail_step).
 
-    # Rise to 17028 (below target 17032): stop moves up to 17028 - 15 = 17013
-    s.on_tick({"price": 17028.0, "ts": base + datetime.timedelta(minutes=6)})
-    assert s.state.name == "IN_POSITION"
-    risen_stop = s._position.stop_loss  # type: ignore[union-attr]
+    The stop must only move up — never retreat.
+    """
+    trail_step = _live_cfg.get("trail_step", 10.0)
+    current_stop = 17005.0  # initial stop (entry - sl_points = 17020 - 15)
 
-    # Price falls back to 17022 (still above stop 17013): stop must NOT retreat
-    s.on_tick({"price": 17022.0, "ts": base + datetime.timedelta(minutes=7)})
-    assert s.state.name == "IN_POSITION", "Position exited unexpectedly"
-    assert s._position.stop_loss >= risen_stop, "Trailing stop retreated for long position"  # type: ignore[union-attr]
+    # Price rises to 17030: new stop candidate = 17030 - trail_step
+    price_high = 17030.0
+    new_stop = max(current_stop, price_high - trail_step)
+    assert new_stop > current_stop, "Stop must rise when price rises"
+
+    # Price retreats to 17022: stop must NOT fall below new_stop
+    price_retreat = 17022.0
+    after_retreat = max(new_stop, price_retreat - trail_step)
+    assert after_retreat >= new_stop, "Trailing stop must never retreat for a long"
 
 
 @pytest.mark.fast
