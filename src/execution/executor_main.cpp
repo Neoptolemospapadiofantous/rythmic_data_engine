@@ -591,7 +591,20 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     auto payload = proto_strip(beast::buffers_to_string(buf.data()));
                     rti::Base base;
                     base.ParseFromString(payload);
-                    if (base.template_id() == 17) break;
+                    if (base.template_id() == 17) {
+                        rti::ResponseRithmicSystemInfo sinfo;
+                        sinfo.ParseFromString(payload);
+                        std::string avail;
+                        for (auto& sn : sinfo.system_name()) avail += "[" + sn + "] ";
+                        LOG("[EXECUTOR] ORDER_PLANT available systems: %s", avail.c_str());
+                        bool found = false;
+                        for (auto& sn : sinfo.system_name())
+                            if (sn == orb_cfg.rithmic_system_name) { found = true; break; }
+                        if (!found)
+                            LOG("[EXECUTOR] WARNING: '%s' NOT in system list — login will likely fail",
+                                orb_cfg.rithmic_system_name.c_str());
+                        break;
+                    }
                 }
             }
             try { probe->close(websocket::close_code::normal); } catch (...) {}
