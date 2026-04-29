@@ -83,6 +83,15 @@ void Collector::on_tick(TickRow row) {
     if (need_flush) flush();
 }
 
+// ── ensure_db_connected ────────────────────────────────────────────
+
+void Collector::ensure_db_connected() {
+    if (!db_->is_connected()) {
+        LOG("  DB disconnected — attempting reconnect...");
+        db_->reconnect();
+    }
+}
+
 // ── flush ──────────────────────────────────────────────────────────
 
 int Collector::flush() {
@@ -106,10 +115,7 @@ int Collector::flush() {
 
     // Step 3: drain into DB.
     try {
-        if (!db_->is_connected()) {
-            LOG("  DB disconnected — attempting reconnect...");
-            db_->reconnect();
-        }
+        ensure_db_connected();
         int n;
         if (was_dirty) {
             auto pending = wal_->replay();
@@ -181,10 +187,7 @@ int Collector::flush_bbo() {
         last_bbo_flush_ = std::chrono::steady_clock::now();
     }
     try {
-        if (!db_->is_connected()) {
-            LOG("  DB disconnected — attempting reconnect...");
-            db_->reconnect();
-        }
+        ensure_db_connected();
         int n = db_->write_bbo(batch);
         LOG("  Wrote %d BBO rows", n);
         return n;
@@ -222,10 +225,7 @@ int Collector::flush_depth() {
         last_depth_flush_ = std::chrono::steady_clock::now();
     }
     try {
-        if (!db_->is_connected()) {
-            LOG("  DB disconnected — attempting reconnect...");
-            db_->reconnect();
-        }
+        ensure_db_connected();
         int n = db_->write_depth(batch);
         LOG("  Wrote %d depth rows", n);
         return n;
