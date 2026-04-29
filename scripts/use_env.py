@@ -34,6 +34,11 @@ RESET  = "\033[0m"
 
 CONFIG_FILES = ["live_config.json", "MNQ_config.json", "MES_config.json", "MYM_config.json"]
 
+# Fields that are explicitly allowed to be cleared to "" when switching envs.
+# Without this, the override logic skips empty strings (to avoid clobbering good values),
+# but account_id/fcm_id/ib_id must be cleared when switching from legends → paper/test.
+CLEARABLE_FIELDS = {"account_id", "fcm_id", "ib_id"}
+
 # Active alias keys written back to .env
 ORDER_ALIASES: dict[str, str] = {
     "USER":     "RITHMIC_LEGENDS_USER",
@@ -200,8 +205,9 @@ def _apply_config_overrides(override_file: Path) -> None:
                             cfg["prop_firm"][pk] = pv
                             changed = True
                 else:
-                    # Skip empty-string overrides — they would clobber valid existing values
-                    if v != "" and cfg.get(k) != v:
+                    # Allow clearing CLEARABLE_FIELDS (e.g. account_id when switching to paper);
+                    # skip empty for all other fields to avoid clobbering valid existing values.
+                    if (v != "" or k in CLEARABLE_FIELDS) and cfg.get(k) != v:
                         cfg[k] = v
                         changed = True
             if changed:
