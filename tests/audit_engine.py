@@ -177,6 +177,23 @@ def check_source_invariants() -> bool:
          SRC_DIR / "execution" / "orb_strategy.hpp", "eod_flatten", True),
         ("audit_log in dashboard.cpp",
          SRC_DIR / "dashboard.cpp", "audit_log", True),
+        # execution/ header invariants
+        ("MNQ_TICK_VALUE defined in execution/orb_config.hpp",
+         SRC_DIR / "execution" / "orb_config.hpp", "MNQ_TICK_VALUE", True),
+        ("eod_flatten_hour in execution/orb_config.hpp",
+         SRC_DIR / "execution" / "orb_config.hpp", "eod_flatten_hour", True),
+        ("trailing_drawdown_cap in execution/orb_config.hpp",
+         SRC_DIR / "execution" / "orb_config.hpp", "trailing_drawdown_cap", True),
+        ("OrbConfig::from_file in execution/orb_config.hpp",
+         SRC_DIR / "execution" / "orb_config.hpp", "from_file", True),
+        ("dry_run field in execution/orb_config.hpp",
+         SRC_DIR / "execution" / "orb_config.hpp", "dry_run", True),
+        ("MNQ_TICK_VALUE in execution/latency_logger.hpp (CPP-BUG-001 header guard)",
+         SRC_DIR / "execution" / "latency_logger.hpp", "MNQ_TICK_VALUE", True),
+        ("RiskManager class in execution/risk_manager.hpp",
+         SRC_DIR / "execution" / "risk_manager.hpp", "class RiskManager", True),
+        ("PosState state machine in execution/order_manager.hpp",
+         SRC_DIR / "execution" / "order_manager.hpp", "PosState", True),
     ]
 
     for label, fpath, pattern, required in checks:
@@ -620,7 +637,7 @@ def check_config() -> bool:
         ("RITHMIC_AMP_USER",        None),
         ("RITHMIC_AMP_PASSWORD",    None),
         ("RITHMIC_LEGENDS_USER",    None),
-        ("RITHMIC_LEGENDS_PASSWORD", None),
+        ("RITHMIC_LEGENDS_PASSWORD", "non-empty"),
         ("RITHMIC_LEGENDS_SYSTEM",  None),
         ("RITHMIC_LEGENDS_URL",     None),
         ("RITHMIC_LEGENDS_ACCOUNT", None),
