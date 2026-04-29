@@ -88,7 +88,10 @@ public:
         } else if (pInfo->iAlertType == RApi::ALERT_LOGIN_FAILED) {
             LOG("[SDK_MD] MD login FAILED — code=%d", pInfo->iRpCode);
         } else if (pInfo->iAlertType == RApi::ALERT_CONNECTION_BROKEN) {
-            LOG("[SDK_MD] Connection broken — SDK will auto-reconnect");
+            LOG("[SDK_MD] Connection broken");
+            login_ok_.store(false, std::memory_order_release);
+        } else if (pInfo->iAlertType == RApi::ALERT_FORCED_LOGOUT) {
+            LOG("[SDK_MD] FORCED LOGOUT — another session using same AMP credentials");
             login_ok_.store(false, std::memory_order_release);
         }
         return OK;
