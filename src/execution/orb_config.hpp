@@ -164,7 +164,10 @@ struct OrbConfig {
         c.md_url         = env("RITHMIC_AMP_URL",       c.md_url.c_str());
 
         // Legends credentials for ORDER_PLANT (execution) — prop firm account
+        // Username: JSON field takes effect; env var overrides (allows runtime swap without rebuild)
         c.rithmic_user        = env("RITHMIC_LEGENDS_USER",     "");
+        if (c.rithmic_user.empty())
+            c.rithmic_user    = json_str(text, "rithmic_legends_user", "");
         c.rithmic_password    = env("RITHMIC_LEGENDS_PASSWORD",  "");
         c.rithmic_system_name = env("RITHMIC_LEGENDS_SYSTEM",   "LegendsTrading");
         c.rithmic_url         = env("RITHMIC_LEGENDS_URL",       c.rithmic_url.c_str());
