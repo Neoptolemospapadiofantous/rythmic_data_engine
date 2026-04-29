@@ -1,5 +1,5 @@
 {
-  "_comment": "Live trading configuration for MNQ 15-min ORB strategy.",
+  "_comment": "Live trading configuration for MNQ 5-min ORB strategy.",
   "dry_run": false,
   "starting_balance": 49594.48,
   "symbol": "MNQ",
@@ -15,7 +15,7 @@
   "daily_loss_limit": -200.0,
   "trailing_drawdown_cap": 2500.0,
   "consistency_cap_pct": 0.3,
-  "orb_minutes": 15,
+  "orb_minutes": 5,
   "sl_points": 15.0,
   "trail_step": 10.0,
   "trail_be_trigger": 3.0,
@@ -37,7 +37,7 @@
     "consistency_rule_pct": 0.3
   },
   "orb": {
-    "orb_period_minutes": 15,
+    "orb_period_minutes": 5,
     "stop_loss_ticks": 60,
     "target_ticks": 48,
     "tick_size": 0.25,
