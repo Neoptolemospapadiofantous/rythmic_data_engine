@@ -37,6 +37,19 @@ from typing import Optional
 
 log = logging.getLogger(__name__)
 
+
+def _load_dotenv(path: Path = Path(".env")) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+
+
+_load_dotenv()
+
 # ── constants ─────────────────────────────────────────────────────────────────
 
 CONFIG_PATH      = Path("config/live_config.json")

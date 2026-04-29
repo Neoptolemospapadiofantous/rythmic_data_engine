@@ -107,6 +107,10 @@ def decode_response(data: bytes) -> dict:
             except Exception:
                 pass
             fields.setdefault(field_num, []).append(val)
+        elif wire_type == 1:  # 64-bit fixed (double / sfixed64)
+            pos += 8
+        elif wire_type == 5:  # 32-bit fixed (float / sfixed32)
+            pos += 4
         else:
             print(f"  [warn] unknown wire type {wire_type} at field {field_num}, stopping parse")
             break

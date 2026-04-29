@@ -1,0 +1,17 @@
+{
+  "_comment": "Tradeify prop firm overrides — applied by scripts/use_env.py. Update system_name/URL after confirming with Tradeify support.",
+  "rithmic_legends_user": "RTU989361488",
+  "account_id": "",
+  "trade_route": "Rithmic Order Routing",
+  "fcm_id": "",
+  "ib_id": "",
+  "starting_balance": 25000.0,
+  "prop_firm": {
+    "name": "Tradeify 25K",
+    "daily_loss_limit": 1000.0,
+    "max_position_size": 2,
+    "max_daily_trades": 3,
+    "trailing_drawdown_limit": 1250.0,
+    "consistency_rule_pct": 0.3
+  }
+}

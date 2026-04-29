@@ -1,5 +1,5 @@
 {
-  "_comment": "Rithmic Paper Trading environment overrides \u2014 applied by scripts/use_env.py",
+  "_comment": "Legends live prop firm overrides \u2014 applied by scripts/use_env.py",
   "dry_run": true,
   "symbol": "MES",
   "trade_contract": "MESM6",
@@ -27,10 +27,10 @@
   "session_open_min": 47,
   "qty": 1,
   "prop_firm": {
-    "name": "Rithmic Paper Trading",
+    "name": "Legends 50K Master",
     "daily_loss_limit": 2000.0,
-    "max_position_size": 5,
-    "max_daily_trades": 10,
+    "max_position_size": 3,
+    "max_daily_trades": 3,
     "trailing_drawdown_limit": 2500.0,
     "consistency_rule_pct": 0.3
   },
@@ -61,6 +61,6 @@
     "log_trades_to_db": true,
     "log_ticks": false
   },
-  "rithmic_legends_user": "n.papdiofantous.gaming.moments@gmail.com",
-  "starting_balance": 50000.0
+  "rithmic_legends_user": "PAPA121797704102",
+  "starting_balance": 49594.48
 }

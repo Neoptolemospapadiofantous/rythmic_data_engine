@@ -679,20 +679,20 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
                 beast::flat_buffer tr_buf;
                 bool route_found = false;
-                // 5-second budget for all route responses; prevents blocking the io_context
-                // if Rithmic is unresponsive (off-hours, network issue).
-                beast::get_lowest_layer(*order_plant->ws).expires_after(
-                    std::chrono::seconds(5));
                 for (int i = 0; i < 50; ++i) {
                     tr_buf.clear();
+                    beast::get_lowest_layer(*order_plant->ws).expires_after(
+                        std::chrono::seconds(5));
                     try {
                         co_await order_plant->ws->async_read(tr_buf, asio::use_awaitable);
                     } catch (std::exception& e) {
                         LOG("[ORDER_PLANT] Trade route read timeout/error: %s — "
                             "using config fallback '%s'",
                             e.what(), order_plant->trade_route.c_str());
+                        // Reconnect: timer killed the socket, can't reuse it.
                         break;
                     }
+                    beast::get_lowest_layer(*order_plant->ws).expires_never();
                     auto pl = proto_strip(beast::buffers_to_string(tr_buf.data()));
                     rti::Base base; base.ParseFromString(pl);
                     if (base.template_id() != 311) continue;
@@ -710,11 +710,10 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                             route_found = true;
                         }
                     }
-                    // rp_code="0" is the terminal (end-of-list) marker in Rithmic's protocol.
-                    if (!tr.rp_code().empty() && tr.rp_code(0) == "0") break;
+                    // rp_code="0" = normal end-of-list; other non-empty codes (e.g. "1043"
+                    // = no routes on new accounts) are also terminal — break on any.
+                    if (!tr.rp_code().empty()) break;
                 }
-                // Reset timer so subsequent op_loop reads are not affected.
-                beast::get_lowest_layer(*order_plant->ws).expires_never();
                 if (route_found)
                     LOG("[ORDER_PLANT] Resolved trade_route='%s'", order_plant->trade_route.c_str());
                 else
@@ -828,6 +827,33 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     notif.fcm_id().c_str(), notif.ib_id().c_str(), notif.account_id().c_str(),
                     notif.symbol().c_str(), notif.exchange().c_str(), notif.user_tag().c_str(),
                     notif.quantity());
+
+                // ── Startup reconciliation ────────────────────────────────────────
+                // is_snapshot=1 messages arrive right after subscribing for order updates
+                // and reflect the exchange's current open orders — including any position
+                // left open by a prior executor session that was killed mid-trade.
+                // A WORKING order for our symbol means an unmanaged open position exists.
+                // Halt new entries immediately so we never add a second contract.
+                if (notif.is_snapshot()) {
+                    LOG("[EXECUTOR] [RECON] snapshot: basket=%s status=%s "
+                        "filled=%d unfilled=%d sym=%s",
+                        notif.basket_id().c_str(), notif.status().c_str(),
+                        notif.total_fill_size(), notif.total_unfilled_size(),
+                        notif.symbol().c_str());
+                    if (notif.symbol() == trade_symbol &&
+                        (notif.status() == "WORKING" || notif.status() == "ACTIVE")) {
+                        LOG("[EXECUTOR] CRITICAL: %s order for %s detected on startup "
+                            "(basket=%s) — open position from prior session. "
+                            "New entries HALTED. Close position on Legends platform.",
+                            notif.status().c_str(), trade_symbol.c_str(),
+                            notif.basket_id().c_str());
+                        strategy.halt_trading("startup_open_position");
+                        flush_position(db.get(), today, order_mgr, strategy,
+                                       order_plant->connected, orb_cfg.point_value);
+                    }
+                    continue;  // never process snapshots as live fills
+                }
+
                 // When our stop order reaches the exchange, capture the server basket_id.
                 if (order_mgr.is_stop_basket(notif.user_tag()) && !notif.basket_id().empty()) {
                     order_mgr.set_stop_server_basket(notif.basket_id());
