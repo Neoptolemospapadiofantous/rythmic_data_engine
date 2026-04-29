@@ -49,6 +49,7 @@ except ImportError:
 
 from models import Trade, SessionSummary
 from strategy import MicroORBStrategy, Signal
+from strategy.micro_orb import StrategyState, _Position
 
 # ── constants ─────────────────────────────────────────────────────────────────
 
@@ -168,8 +169,6 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
         row["id"], row["direction"], row["entry_price"], row["stop_loss"],
     )
 
-    # Force strategy into IN_POSITION state with the recovered position
-    from strategy.micro_orb import StrategyState
     strategy._position = strategy._make_position_from_db(row)  # type: ignore[attr-defined]
     strategy.state = StrategyState.IN_POSITION
     return dict(row)
@@ -401,7 +400,6 @@ class LiveTrader:
             self._maybe_watchdog()
             self._maybe_eod(now_et)
 
-            from strategy.micro_orb import StrategyState
             if self._strategy.state == StrategyState.IN_POSITION:
                 self._tick_loop()
             else:
@@ -503,7 +501,6 @@ class LiveTrader:
         The UI reads this file for the live position display. Atomic write via
         .tmp + rename prevents partial reads.
         """
-        from strategy.micro_orb import StrategyState
         try:
             pos = self._strategy.current_position()
             if pos is not None:
@@ -569,7 +566,6 @@ def compute_live_features(bars: list) -> dict:
 
 def _make_position_from_db(self, row: dict):
     """Restore a _Position from a DB trade row."""
-    from strategy.micro_orb import _Position
     p = _Position(
         direction=row["direction"],
         entry_price=float(row["entry_price"]),
