@@ -3,13 +3,15 @@
 audit_engine.py — Comprehensive build + source + schema + data audit for rithmic_engine.
 
 Sections:
-  1. Build integrity     — binaries exist and are executable
-  2. Source invariants   — grep checks (no compile needed)
-  3. Proto integrity     — BBO/Depth message fields present
-  4. PostgreSQL schema   — tables, columns, indexes
-  5. Data health         — row counts, WAL state (requires PG)
-  6. Config validation   — .env completeness
-  7. Summary
+  1. Build integrity          — binaries exist and are executable
+  2. Source invariants        — grep checks (no compile needed)
+  3. Proto integrity          — BBO/Depth message fields present
+  4. PostgreSQL schema        — tables, columns, indexes
+  5. Data health              — row counts, WAL state (requires PG)
+  6. Python data readability  — pandas read + sanity checks
+  7. ML on/off comparison     — paper trading comparison
+  8. Config validation        — .env completeness
+  9. Summary
 
 Usage:
     python tests/audit_engine.py
@@ -164,6 +166,17 @@ def check_source_invariants() -> bool:
          db_cpp, "loss_limits", True),
         ("gate_results table in db.cpp",
          db_cpp, "gate_results", True),
+        # execution/ subdirectory checks
+        ("ORBStrategy class in execution/orb_strategy.cpp",
+         SRC_DIR / "execution" / "orb_strategy.cpp", "ORBStrategy", True),
+        ("submit_order in execution/order_manager.cpp",
+         SRC_DIR / "execution" / "order_manager.cpp", "submit_order", True),
+        ("daily_loss_limit in execution/risk_manager.cpp",
+         SRC_DIR / "execution" / "risk_manager.cpp", "daily_loss_limit", True),
+        ("eod_flatten in execution/orb_strategy.hpp",
+         SRC_DIR / "execution" / "orb_strategy.hpp", "eod_flatten", True),
+        ("audit_log in dashboard.cpp",
+         SRC_DIR / "dashboard.cpp", "audit_log", True),
     ]
 
     for label, fpath, pattern, required in checks:
@@ -175,6 +188,18 @@ def check_source_invariants() -> bool:
         result(f"  {label}", status)
         if not found and required:
             ok = False
+
+    # CPP-BUG-001 regression guard: latency_logger must reference MNQ tick value (0.50 not NQ 5.00)
+    latency_cpp = SRC_DIR / "execution" / "latency_logger.cpp"
+    if latency_cpp.exists():
+        found = _grep(latency_cpp, "MNQ_TICK_VALUE") or _grep(latency_cpp, "tick_value")
+        result("  MNQ tick value guard in execution/latency_logger.cpp (CPP-BUG-001)",
+               PASS if found else FAIL)
+        if not found:
+            ok = False
+    else:
+        result("  MNQ tick value guard in execution/latency_logger.cpp (CPP-BUG-001)",
+               WARN, "latency_logger.cpp not found")
 
     # migrate_parquet.py ON CONFLICT check (non-fatal — file may not exist)
     if migrate_py.exists():
@@ -579,7 +604,7 @@ def check_ml_comparison() -> bool:
 
 # ── section 8: config validation ───────────────────────────────────
 def check_config() -> bool:
-    section("7. Config Validation (.env)")
+    section("8. Config Validation (.env)")
     ok = True
 
     if not ENV_FILE.exists():
@@ -592,9 +617,16 @@ def check_config() -> bool:
         ("PG_DB",                None),
         ("PG_USER",              None),
         ("PG_PASSWORD",          "non-empty"),
-        ("RITHMIC_AMP_USER",     None),
-        ("RITHMIC_AMP_PASSWORD", None),
-        ("RITHMIC_SYMBOL",       "NQ"),
+        ("RITHMIC_AMP_USER",        None),
+        ("RITHMIC_AMP_PASSWORD",    None),
+        ("RITHMIC_LEGENDS_USER",    None),
+        ("RITHMIC_LEGENDS_PASSWORD", None),
+        ("RITHMIC_LEGENDS_SYSTEM",  None),
+        ("RITHMIC_LEGENDS_URL",     None),
+        ("RITHMIC_LEGENDS_ACCOUNT", None),
+        ("RITHMIC_APP_NAME",        None),
+        ("RITHMIC_APP_VERSION",     None),
+        ("RITHMIC_SYMBOL",          "NQ"),
         ("RITHMIC_EXCHANGE",     "CME"),
     ]
 
