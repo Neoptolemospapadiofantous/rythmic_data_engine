@@ -20,6 +20,7 @@ G. Disk space > 5 GB on working directory filesystem
 H. No data/DRIFT_HALT file present
 I. Prop firm limits set (daily_loss_limit > 0, max_position_size > 0)
 J. Account equity above minimum (when PNL_PLANT_EQUITY env var is set)
+K. trade_route is not 'simulator'
 """
 from __future__ import annotations
 
@@ -351,6 +352,21 @@ def _gate_account_equity(cfg: dict) -> GateResult:
     )
 
 
+def _gate_trade_route(cfg: dict) -> GateResult:
+    route = cfg.get("trade_route", "")
+    if route.lower() == "simulator":
+        return GateResult(
+            "K. trade_route not 'simulator'",
+            False,
+            f"trade_route='{route}' — must not be 'simulator' for live trading",
+        )
+    return GateResult(
+        "K. trade_route not 'simulator'",
+        True,
+        f"trade_route='{route}'",
+    )
+
+
 _ALL_GATES = [
     _gate_no_deploy,
     _gate_config_valid,
@@ -362,6 +378,7 @@ _ALL_GATES = [
     _gate_drift_halt,
     _gate_prop_firm,
     _gate_account_equity,
+    _gate_trade_route,
 ]
 
 
@@ -516,6 +533,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  H. No data/DRIFT_HALT file\n"
             "  I. Prop firm limits set (daily_loss_limit > 0, max_position_size > 0)\n"
             "  J. Account equity above minimum (when PNL_PLANT_EQUITY env var is set)\n"
+            "  K. trade_route is not 'simulator'\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
