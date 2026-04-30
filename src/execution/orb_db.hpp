@@ -500,6 +500,15 @@ private:
             instrument_.c_str(), strategy_.c_str());
     }
 
+    // Push current price to any LISTEN live_tick subscribers (non-throwing)
+    void notify_tick(double price) {
+        if (!is_connected()) return;
+        char sql[80];
+        snprintf(sql, sizeof(sql), "NOTIFY live_tick, '%.2f'", price);
+        PGresult* res = PQexec(conn_, sql);
+        if (res) PQclear(res);
+    }
+
     // DDL-only helper — used exclusively for schema setup (no user input)
     void exec(const char* sql) {
         if (!is_connected()) reconnect();

@@ -1069,8 +1069,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 db->reconnect();
             }
 
-            // Periodic position flush every 5 seconds
-            if (++pos_write_counter >= 5) {
+            // Periodic position flush every 1 second + notify live price
+            if (++pos_write_counter >= 1) {
                 pos_write_counter = 0;
                 try {
                     flush_position(db.get(), today, order_mgr, strategy,
@@ -1078,6 +1078,10 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 } catch (std::exception& e) {
                     LOG("[EXECUTOR] DB flush_position failed: %s", e.what());
                     if (db) db->reconnect();
+                }
+                double last_px = strategy.last_price();
+                if (db && last_px > 0.0) {
+                    try { db->notify_tick(last_px); } catch (...) {}
                 }
             }
         }
