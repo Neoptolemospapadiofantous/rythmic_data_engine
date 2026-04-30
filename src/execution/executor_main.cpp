@@ -45,6 +45,7 @@
 #include "config.hpp"
 #include "db.hpp"
 #include "log.hpp"
+#include "../audit.hpp"
 
 #include "rithmic.pb.h"
 
@@ -402,6 +403,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             carried_pos.direction == OrbSignal::BUY ? "LONG" : "SHORT",
             carried_pos.entry_price, carried_pos.sl_price);
         strategy.halt_trading("reconnect_unreconciled_position");
+        audit_log.error("risk.halted", "reconnect with non-flat carried position — halting new entries");
     }
     carried_pos = Position{};  // reset; will be populated again at session end
 
@@ -430,6 +432,14 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         LOG("[EXECUTOR] WARNING: OrbDB failed (%s) — trades will not be persisted", e.what());
     }
 
+    // ── AuditLog setup ────────────────────────────────────────────────────────
+    PGconn* audit_conn = PQconnectdb(orb_cfg.pg_connstr().c_str());
+    if (!audit_conn || PQstatus(audit_conn) != CONNECTION_OK) {
+        LOG("[EXECUTOR] WARNING: AuditLog DB connect failed — audit disabled");
+        if (audit_conn) { PQfinish(audit_conn); audit_conn = nullptr; }
+    }
+    AuditLog audit_log(audit_conn);
+
     // ── Order plant setup ─────────────────────────────────────────────────────
     auto order_plant = std::make_shared<OrderPlant>();
     order_plant->account_id = ""; // populated after login
@@ -438,7 +448,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
     // Wire order_mgr → order_plant (uses order_plant->trade_symbol for the specific contract)
     order_mgr.set_order_callback(
-        [&order_plant, &orb_cfg](const std::string& basket_id,
+        [&order_plant, &orb_cfg, &audit_log](const std::string& basket_id,
                                  const std::string& /*symbol*/,
                                  const std::string& exchange,
                                  int qty, int order_type, bool is_buy,
@@ -448,6 +458,10 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             std::string result = order_plant->send_new_order(
                 basket_id, sym, exchange, qty, order_type,
                 is_buy, price, user_tag, orb_cfg.dry_run);
+            if (!result.empty()) {
+                audit_log.info("order.submitted",
+                    basket_id + " " + (is_buy ? "BUY" : "SELL"));
+            }
             return !result.empty();
         }
     );
@@ -554,6 +568,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 }
                 double hb_interval = resp.heartbeat_interval();
                 LOG("[EXECUTOR] MD plant login OK (heartbeat_interval=%.0fs)", hb_interval);
+                audit_log.info("session.md_login", "MD plant login OK");
                 break;
             }
         }
@@ -655,6 +670,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         }
                         LOG("[EXECUTOR] ORDER_PLANT login OK unique_user_id=%s",
                             resp.unique_user_id().c_str());
+                        audit_log.info("session.order_plant_login", "ORDER_PLANT login OK");
                         break;
                     }
                 }
@@ -860,6 +876,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                             notif.status().c_str(), trade_symbol.c_str(),
                             notif.basket_id().c_str());
                         strategy.halt_trading("startup_open_position");
+                        audit_log.error("risk.halted", "startup open position detected — halting new entries");
                         flush_position(db.get(), today, order_mgr, strategy,
                                        order_plant->connected, orb_cfg.point_value);
                     }
@@ -1004,6 +1021,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             if (g_flatten_requested.exchange(false)) {
                 LOG("[EXECUTOR] Kill signal — flattening position");
                 order_mgr.flatten_now("kill_signal");
+                audit_log.info("session.eod_flatten", "EOD position flattened (kill signal)");
             }
 
             if (!g_running) co_return;
@@ -1071,6 +1089,11 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             // Attempt DB reconnect if disconnected (avoids prolonged stale-data windows)
             if (db && !db->is_connected()) {
                 db->reconnect();
+            }
+
+            // Periodic audit flush (best-effort; only when audit_conn is available)
+            if (audit_conn) {
+                try { audit_log.flush(); } catch (...) {}
             }
 
             // Periodic position flush every 1 second + notify live price
@@ -1440,6 +1463,14 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
     carried_pos = order_mgr.position_snapshot();  // preserve state across reconnects (#2)
     LOG("[EXECUTOR] Main loop exited — carried_pos.state=%d", (int)carried_pos.state);
+
+    // Final audit flush before shutdown
+    if (audit_conn) {
+        try { audit_log.flush(); } catch (...) {}
+        PQfinish(audit_conn);
+        audit_conn = nullptr;
+    }
+
     ioc_ref.stop();  // unblock ioc.run() so outer reconnect loop can restart
 }
 
