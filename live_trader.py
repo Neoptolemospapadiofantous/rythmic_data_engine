@@ -186,15 +186,13 @@ def _submit_order(signal: Signal, config: dict, dry_run: bool, log: logging.Logg
                  signal.direction, signal.entry_price, signal.stop_loss, signal.target)
         return f"DRY-{datetime.datetime.now(datetime.timezone.utc).strftime('%H%M%S%f')}"
 
-    # Live order submission is intentionally not implemented here.
-    # Gate: live trading requires go_live.py to have set dry_run=False after passing
-    # all pre-flight checks. The actual submission path goes through the C++ executor
-    # (src/client.cpp) or a future async_rithmic Python client.
-    raise NotImplementedError(
-        "Live order submission not yet implemented. "
-        "Run with dry_run=True for paper trading. "
-        "See src/client.cpp for the C++ protobuf order submission pattern."
+    # Live order submission is not implemented in the Python path.
+    # The C++ executor (src/execution/executor_main.cpp) handles live orders.
+    log.critical(
+        "LIVE ORDER ATTEMPTED via Python path — this is not supported. "
+        "Use the C++ executor for live trading. Halting process."
     )
+    sys.exit(1)
 
 
 # ── trade DB writes ───────────────────────────────────────────────────────────
