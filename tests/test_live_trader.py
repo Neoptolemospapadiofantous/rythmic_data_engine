@@ -261,15 +261,17 @@ class TestDryRunGate(unittest.TestCase):
         msg_args = log.info.call_args[0]
         self.assertIn("DRY RUN", msg_args[0])
 
-    def test_dry_run_false_raises_not_implemented(self):
-        """When dry_run=False, submit_order raises NotImplementedError (gate before live)."""
+    def test_dry_run_false_exits_with_critical(self):
+        """When dry_run=False, submit_order logs CRITICAL and calls sys.exit(1)."""
         import live_trader
         cfg = _make_config()
         log = MagicMock()
         sig = Signal("LONG", 17010.0, 17006.0, 17022.0, datetime.datetime.now(tz=ET))
-        with self.assertRaises(NotImplementedError) as ctx:
+        with self.assertRaises(SystemExit) as ctx:
             live_trader._submit_order(sig, cfg, dry_run=False, log=log)
-        self.assertIn("dry_run=True", str(ctx.exception))
+        self.assertEqual(ctx.exception.code, 1)
+        log.critical.assert_called_once()
+        self.assertIn("LIVE ORDER", log.critical.call_args[0][0])
 
 
 # ── NO_DEPLOY lockfile test ───────────────────────────────────────────────────

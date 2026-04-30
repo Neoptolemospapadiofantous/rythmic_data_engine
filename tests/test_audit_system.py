@@ -478,9 +478,9 @@ def test_trailing_drawdown_matches_prop_firm():
 # ── GROUP 8: ORB strategy config values ───────────────────────────────────────
 
 @pytest.mark.fast
-def test_orb_minutes_is_5():
-    assert _live_cfg.get("orb_minutes") == 5, (
-        f"orb_minutes={_live_cfg.get('orb_minutes')} — strategy requires 5-min ORB"
+def test_orb_minutes_is_15():
+    assert _live_cfg.get("orb_minutes") == 15, (
+        f"orb_minutes={_live_cfg.get('orb_minutes')} — Legends config uses 15-min ORB"
     )
 
 
