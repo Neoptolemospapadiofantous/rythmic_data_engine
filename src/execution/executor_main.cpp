@@ -1415,9 +1415,24 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         }
     };
 
+    // Signal-responsive flatten: handles SIGTERM/SIGINT immediately from within the
+    // ASIO executor so flatten_now() fires without waiting for the next eod_loop tick.
+    // This closes any PENDING_ENTRY cancel and LONG/SHORT market exit right away.
+    auto signal_loop = [&]() -> asio::awaitable<void> {
+        asio::signal_set sigs(ex, SIGINT, SIGTERM);
+        int sig = co_await sigs.async_wait(asio::use_awaitable);
+        LOG("[EXECUTOR] Signal %d — immediate flatten + shutdown", sig);
+        g_running = false;
+        order_mgr.flatten_now("kill_signal");
+        if (audit_conn)
+            audit_log.info("session.eod_flatten", "kill signal immediate flatten");
+        ioc_ref.stop();
+    };
+
     // Run all coroutines concurrently
     // (In a real deployment we'd use parallel_group; for simplicity we spawn
     //  as separate tasks on the same io_context — C++20 coroutines co_spawn)
+    asio::co_spawn(ex, signal_loop(),     asio::detached);
     asio::co_spawn(ex, heartbeat_loop(),  asio::detached);
     asio::co_spawn(ex, eod_loop(),        asio::detached);
     asio::co_spawn(ex, op_loop(),         asio::detached);
@@ -1476,8 +1491,11 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 int main(int argc, char* argv[]) {
-    std::signal(SIGINT,  handle_signal);
-    std::signal(SIGTERM, handle_signal);
+    // SIGINT/SIGTERM handled by asio::signal_set inside the session coroutine
+    // (immediate flatten_now rather than waiting up to 1s for eod_loop tick).
+    // Keep SIG_IGN for accidental double-CTRL+C before ASIO loop starts.
+    std::signal(SIGINT,  SIG_IGN);
+    std::signal(SIGTERM, SIG_IGN);
 
     // ── Parse args ────────────────────────────────────────────────────────────
     std::string config_path = "config/orb_config.json";
