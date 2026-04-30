@@ -24,7 +24,7 @@
   "last_entry_hour": 13,
   "eod_flatten_hour": 15,
   "eod_flatten_min": 55,
-  "session_open_hour": 10,
-  "session_open_min": 0,
+  "session_open_hour": 9,
+  "session_open_min": 30,
   "qty": 1
 }
