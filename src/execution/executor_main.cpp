@@ -537,6 +537,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         co_await ws_write(*md_ws, proto_frame(req));
 
         beast::flat_buffer buf;
+        beast::get_lowest_layer(*md_ws).expires_after(std::chrono::seconds(15));
         for (;;) {
             buf.clear();
             co_await md_ws->async_read(buf, asio::use_awaitable);
@@ -556,6 +557,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 break;
             }
         }
+        beast::get_lowest_layer(*md_ws).expires_never();
         // Server requires immediate heartbeat after login
         {
             rti::RequestHeartbeat hb;
@@ -635,6 +637,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 co_await ws_write(*op_ws, proto_frame(req));
 
                 beast::flat_buffer buf;
+                beast::get_lowest_layer(*op_ws).expires_after(std::chrono::seconds(15));
                 for (;;) {
                     buf.clear();
                     co_await op_ws->async_read(buf, asio::use_awaitable);
@@ -655,6 +658,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         break;
                     }
                 }
+                beast::get_lowest_layer(*op_ws).expires_never();
             }
             // Server requires immediate heartbeat after login
             {
