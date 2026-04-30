@@ -180,11 +180,15 @@ class LiveConfig(BaseModel):
                 f"Use prop_firm.daily_loss_limit for the positive magnitude.")
         return v
 
+    _VALID_SYMBOLS = {"MNQ", "MES", "MYM", "M2K"}
+
     @field_validator("symbol")
     @classmethod
-    def symbol_must_be_mnq(cls, v: str) -> str:
-        if v != "MNQ":
-            raise ValueError(f"symbol='{v}' — this system trades MNQ (Micro NQ futures)")
+    def symbol_must_be_micro_future(cls, v: str) -> str:
+        if v not in cls._VALID_SYMBOLS:
+            raise ValueError(
+                f"symbol='{v}' is not a recognized micro futures contract. "
+                f"Supported: {sorted(cls._VALID_SYMBOLS)}")
         return v
 
     @field_validator("point_value")
