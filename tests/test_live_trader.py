@@ -41,7 +41,7 @@ def _make_config(**orb_overrides) -> dict:
         "stop_loss_ticks": 16,
         "target_ticks": 48,
         "tick_size": 0.25,
-        "point_value": 20.0,
+        "point_value": 2.0,
         "rth_open": "09:30:00",
         "rth_close": "16:00:00",
         "eod_exit_minutes_before_close": 15,
@@ -50,7 +50,7 @@ def _make_config(**orb_overrides) -> dict:
     orb.update(orb_overrides)
     return {
         "dry_run": True,
-        "symbol": "NQ",
+        "symbol": "MNQ",
         "exchange": "CME",
         "orb": orb,
         "db": {"max_retries": 1, "retry_backoff_base": 0},
@@ -507,16 +507,16 @@ class TestDailyPnl(unittest.TestCase):
             mock_cursor = MagicMock()
             mock_cursor.__enter__ = lambda s: mock_cursor
             mock_cursor.__exit__ = MagicMock(return_value=False)
-            # DB row for the open trade: LONG entry at 17000, point_value=20
+            # DB row for the open trade: LONG entry at 17000, point_value=2.0 (MNQ)
             mock_cursor.fetchone.return_value = {"direction": "LONG", "entry_price": 17000.0}
             mock_conn.cursor.return_value = mock_cursor
             trader._conn = mock_conn
 
             self.assertEqual(trader._daily_pnl, 0.0)
-            exit_price = 17010.0  # +10 pts × 20 - $4 commission = +$196
+            exit_price = 17010.0  # +10 pts × 2.0 - $4 commission = +$16
             trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "TARGET_HIT")
 
-            self.assertAlmostEqual(trader._daily_pnl, 196.0, places=2,
+            self.assertAlmostEqual(trader._daily_pnl, 16.0, places=2,
                                    msg="_daily_pnl must accumulate realized P&L after exit")
 
     def test_daily_pnl_negative_on_loss(self):
@@ -538,10 +538,10 @@ class TestDailyPnl(unittest.TestCase):
             mock_conn.cursor.return_value = mock_cursor
             trader._conn = mock_conn
 
-            exit_price = 16996.0  # -4 pts × 20 - $4 commission = -$84
+            exit_price = 16996.0  # -4 pts × 2.0 - $4 commission = -$12
             trader._on_exit(exit_price, datetime.datetime.now(tz=ET), "SL_HIT")
 
-            self.assertAlmostEqual(trader._daily_pnl, -84.0, places=2,
+            self.assertAlmostEqual(trader._daily_pnl, -12.0, places=2,
                                    msg="_daily_pnl must go negative on losing trade")
 
     def test_write_trade_close_returns_pnl(self):
