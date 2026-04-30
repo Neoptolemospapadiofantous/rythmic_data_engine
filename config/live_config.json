@@ -29,6 +29,7 @@
   "session_open_hour": 9,
   "session_open_min": 30,
   "qty": 1,
+  "commission_rt": 4.0,
   "prop_firm": {
     "name": "Legends 50K Master",
     "daily_loss_limit": 2000.0,

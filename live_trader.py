@@ -232,7 +232,7 @@ def _update_trade_order_id(conn, trade_id: int, order_id: str) -> None:
 
 
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,
-                       exit_reason: str, point_value: float) -> float:
+                       exit_reason: str, point_value: float, commission_rt: float = 4.0) -> float:
     """Close a trade in the DB and return realized P&L in USD (0.0 if trade not found)."""
     with conn.cursor() as cur:
         cur.execute("SELECT direction, entry_price FROM trades WHERE id = %s", (trade_id,))
@@ -242,8 +242,7 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
         direction = row["direction"]
         entry = float(row["entry_price"])
         pts = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
-        commission_rt = 4.0  # $2/side × 2 sides (Rithmic/Legends MNQ RT commission)
-        pnl_usd = pts * point_value - commission_rt
+        pnl_usd = pts * point_value - commission_rt  # $2/side × 2 sides MNQ RT
         cur.execute("""
             UPDATE trades
             SET exit_price = %s, exit_time = %s, pnl_points = %s,
@@ -488,7 +487,8 @@ class LiveTrader:
             if not isinstance(exit_ts, datetime.datetime):
                 exit_ts = datetime.datetime.now(tz=datetime.timezone.utc)
             realized_pnl = _write_trade_close(self._conn, self._active_trade_id,
-                                              exit_price, exit_ts, exit_reason, self._point_value)
+                                              exit_price, exit_ts, exit_reason, self._point_value,
+                                              float(self._config.get("commission_rt", 4.0)))
             self._daily_pnl += realized_pnl
             self._log.info("trade_close id=%s exit=%s reason=%s pnl=%.2f daily_pnl=%.2f",
                            self._active_trade_id, exit_price, exit_reason,
