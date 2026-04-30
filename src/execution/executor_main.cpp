@@ -1524,7 +1524,7 @@ int main(int argc, char* argv[]) {
 
     // ── Run ───────────────────────────────────────────────────────────────────
     // Hoist session components so they survive reconnects.
-    RiskManager  risk(orb_cfg);
+    RiskManager  risk(orb_cfg, orb_cfg.starting_balance);
     OrbStrategy  strategy(orb_cfg);
     std::string  today;        // empty = first run; triggers reset_session/reset_daily
     Position     carried_pos;  // non-FLAT on reconnect → halt + warn (#2)
