@@ -55,6 +55,10 @@ public:
     // pnl_usd: positive = profit, negative = loss (after commissions)
     void on_trade_pnl(double pnl_usd) {
         std::lock_guard<std::mutex> lk(mu_);
+        if (!std::isfinite(pnl_usd)) {
+            halt("non_finite_pnl: " + std::to_string(pnl_usd));
+            return;
+        }
 
         equity_       += pnl_usd;
         daily_pnl_    += pnl_usd;
