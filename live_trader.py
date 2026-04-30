@@ -243,6 +243,12 @@ def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime
         entry = float(row["entry_price"])
         pts = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
         pnl_usd = pts * point_value - commission_rt  # $2/side × 2 sides MNQ RT
+        if abs(pnl_usd) > 5000.0:
+            import logging as _logging
+            _logging.getLogger("live_trader").warning(
+                "pnl_sanity_check WARN: pnl_usd=%.2f > $5000 threshold "
+                "(pts=%.4f × point_value=%.2f − commission=%.2f) — "
+                "check point_value config", pnl_usd, pts, point_value, commission_rt)
         cur.execute("""
             UPDATE trades
             SET exit_price = %s, exit_time = %s, pnl_points = %s,
