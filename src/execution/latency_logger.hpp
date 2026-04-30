@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 // ─── Per-trade latency record ─────────────────────────────────────────────────
 struct TradeLatency {
@@ -59,12 +60,7 @@ public:
     int64_t on_signal(const std::string& basket_id, double signal_price, bool is_entry) {
         int64_t ts = now_ns();
         std::lock_guard<std::mutex> lk(mu_);
-        pending_.basket_id    = basket_id;
-        pending_.signal_ts_ns = ts;
-        pending_.signal_price = signal_price;
-        pending_.is_entry     = is_entry;
-        pending_.submit_ts_ns = 0;
-        pending_.fill_ts_ns   = 0;
+        pending_[basket_id] = TradeLatency{basket_id, ts, 0, 0, signal_price, 0.0, 0.0, is_entry};
         return ts;
     }
 
@@ -72,9 +68,10 @@ public:
     void on_submit(const std::string& basket_id, double order_price = 0.0) {
         int64_t ts = now_ns();
         std::lock_guard<std::mutex> lk(mu_);
-        if (pending_.basket_id != basket_id) return;
-        pending_.submit_ts_ns = ts;
-        pending_.submit_price = order_price;
+        auto it = pending_.find(basket_id);
+        if (it == pending_.end()) return;
+        it->second.submit_ts_ns = ts;
+        it->second.submit_price = order_price;
     }
 
     // Record fill — returns finalized record
@@ -83,8 +80,10 @@ public:
         TradeLatency rec;
         {
             std::lock_guard<std::mutex> lk(mu_);
-            if (pending_.basket_id != basket_id) return rec;
-            rec = pending_;
+            auto it = pending_.find(basket_id);
+            if (it == pending_.end()) return rec;
+            rec = it->second;
+            pending_.erase(it);
         }
         rec.fill_ts_ns = ts;
         rec.fill_price = fill_price;
@@ -121,6 +120,6 @@ private:
 
     double       tick_value_;
     std::mutex   mu_;
-    TradeLatency pending_;
+    std::unordered_map<std::string, TradeLatency> pending_;
     TradeLatency last_;
 };
