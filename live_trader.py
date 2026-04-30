@@ -582,7 +582,13 @@ MicroORBStrategy._make_position_from_db = _make_position_from_db  # type: ignore
 
 def _load_config(path: str) -> dict:
     with open(path) as f:
-        return json.load(f)
+        cfg = json.load(f)
+    try:
+        from config.live_config_schema import LiveConfig
+        LiveConfig.model_validate(cfg)
+    except Exception as e:
+        raise SystemExit(f"Config validation failed: {e}")
+    return cfg
 
 
 def _check_no_deploy(config: dict) -> None:
