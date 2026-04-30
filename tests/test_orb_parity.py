@@ -1,17 +1,17 @@
 """
 CI parity test: Python MicroORBStrategy vs C++ OrbStrategy (build/orb_strategy).
 
-Six identical 1-min OHLCV bars are fed through both implementations; the test
+Sixteen identical 1-min OHLCV bars are fed through both implementations; the test
 asserts that they produce the same signal direction and stop-loss level.
 The C++ section is skipped gracefully when build/orb_strategy is absent so
 CI does not hard-fail before the binary has been compiled.
 
 Bar scenario (all times Eastern, 2024-03-15)
 ─────────────────────────────────────────────
-  Bars 1-5 (09:30–09:34): build the 5-min opening range.
+  Bars 1-15 (09:30–09:44): build the 15-min opening range (orb_minutes=15).
     Range high = max(highs) = 17510.0
     Range low  = min(lows)  = 17490.0
-  Bar 6 (09:35): close = 17520 > range high → LONG signal expected.
+  Bar 16 (09:45): close = 17520 > range high → LONG signal expected.
     Entry   = 17520.0
     SL      = orb_high − stop_loss_ticks × tick_size = 17510 − 15.0 = 17495.0
     Target  = entry + target_ticks × tick_size = 17520 + 12.0 = 17532.0
@@ -61,15 +61,26 @@ def _bar(minute_offset: int, high: float, low: float,
     return {"ts": ts, "open": open_, "high": high, "low": low, "close": close, "volume": volume}
 
 
-# 5 range bars (minutes 0-4) followed by 1 breakout bar (minute 5)
+# 15 range bars (minutes 0-14) followed by 1 breakout bar (minute 15)
+# orb_minutes=15 (live_config.json): range locks after bar at 09:44 ET.
 RANGE_BARS = [
-    _bar(0, high=17510.0, low=17490.0),  # bar 1: sets range high and low
-    _bar(1, high=17505.0, low=17495.0),  # bar 2
-    _bar(2, high=17508.0, low=17492.0),  # bar 3
-    _bar(3, high=17503.0, low=17497.0),  # bar 4
-    _bar(4, high=17506.0, low=17494.0),  # bar 5 — range locked after this
+    _bar(0,  high=17510.0, low=17490.0),  # bar 1: sets range high and low
+    _bar(1,  high=17505.0, low=17495.0),  # bar 2
+    _bar(2,  high=17508.0, low=17492.0),  # bar 3
+    _bar(3,  high=17503.0, low=17497.0),  # bar 4
+    _bar(4,  high=17506.0, low=17494.0),  # bar 5
+    _bar(5,  high=17504.0, low=17493.0),  # bar 6
+    _bar(6,  high=17507.0, low=17491.0),  # bar 7
+    _bar(7,  high=17509.0, low=17492.0),  # bar 8
+    _bar(8,  high=17502.0, low=17495.0),  # bar 9
+    _bar(9,  high=17505.0, low=17496.0),  # bar 10
+    _bar(10, high=17506.0, low=17493.0),  # bar 11
+    _bar(11, high=17504.0, low=17494.0),  # bar 12
+    _bar(12, high=17507.0, low=17491.0),  # bar 13
+    _bar(13, high=17503.0, low=17492.0),  # bar 14
+    _bar(14, high=17505.0, low=17490.0),  # bar 15 — range locked after this
 ]
-BREAKOUT_BAR = _bar(5, high=17525.0, low=17515.0,
+BREAKOUT_BAR = _bar(15, high=17525.0, low=17515.0,
                     open_=17515.0, close=17520.0, volume=500)
 ALL_BARS = RANGE_BARS + [BREAKOUT_BAR]
 
@@ -179,8 +190,8 @@ class TestPythonORBSignal(unittest.TestCase):
             sig = strategy.on_bar(bar)
             self.assertIsNone(sig, f"Unexpected signal from range bar {i + 1}: {sig}")
 
-    def test_range_locked_correctly_after_5_bars(self):
-        """After 5 range bars, orb_high and orb_low must reflect the actual range."""
+    def test_range_locked_correctly_after_15_bars(self):
+        """After 15 range bars, orb_high and orb_low must reflect the actual range."""
         from strategy.micro_orb import MicroORBStrategy, StrategyState
         strategy = MicroORBStrategy(_load_config())
         for bar in RANGE_BARS:
