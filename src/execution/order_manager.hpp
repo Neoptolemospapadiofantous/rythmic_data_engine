@@ -101,6 +101,11 @@ public:
         }
         if (sig != OrbSignal::BUY && sig != OrbSignal::SELL) return;
 
+        if (entry_halted_) {
+            LOG("[OM] Signal rejected — entries halted after repeated exit rejections");
+            return;
+        }
+
         // Risk check
         std::string halt_reason;
         if (!risk_.can_trade(halt_reason)) {
@@ -274,6 +279,9 @@ public:
 
             risk_.on_trade_pnl(pos_.pnl_usd);
 
+            rejected_exit_count_ = 0;  // successful close — reset rejection counter
+            entry_halted_        = false;
+
             pos_ = Position{};  // back to FLAT
             trade_completed_ = true;
             // Clear stale-stop unwind state. last_stop_for_unwind_ was set when we
@@ -399,13 +407,18 @@ public:
             pos_ = Position{};
             LOG("[OM] Reverted to FLAT after entry rejection");
         } else if (pos_.basket_id_exit == basket_id && pos_.state == PosState::PENDING_EXIT) {
-            // Exit order rejected — revert state so the position can be re-exited.
-            // This can leave a live position open if rejections repeat; LOG as CRITICAL.
-            LOG("[OM] CRITICAL: Exit order rejected basket=%s — reverting to %s, retrying exit",
+            LOG("[OM] CRITICAL: Exit order rejected basket=%s — reverting to %s",
                 basket_id.c_str(), pos_.direction == OrbSignal::BUY ? "LONG" : "SHORT");
             pos_.state = (pos_.direction == OrbSignal::BUY) ? PosState::LONG : PosState::SHORT;
             pos_.basket_id_exit.clear();
-            initiate_exit_locked("rejected_exit_retry", 0.0);
+            ++rejected_exit_count_;
+            if (rejected_exit_count_ <= 3) {
+                initiate_exit_locked("rejected_exit_retry", 0.0);
+            } else {
+                LOG("[OM] CRITICAL: Exit rejected %d times — halting new entries. Manual intervention required.",
+                    rejected_exit_count_);
+                entry_halted_ = true;
+            }
         } else if (pos_.basket_id_stop == basket_id) {
             // Stop order rejected — clear basket so software SL fallback activates
             pos_.basket_id_stop.clear();
@@ -522,6 +535,10 @@ private:
     // EOD cancel race guard: entry cancel sent but fill arrived after pos_ was reset
     std::string pending_cancel_basket_;     // entry basket that was cancelled at EOD
     bool        pending_cancel_was_buy_ = false; // direction of the cancelled entry
+
+    // Exit rejection retry limit
+    int  rejected_exit_count_ = 0;         // incremented each time an exit order is rejected
+    bool entry_halted_        = false;      // set after 3 consecutive exit rejections
 
     static std::atomic<uint64_t> seq_;  // monotonic sequence for basket IDs
 
