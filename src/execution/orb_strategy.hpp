@@ -207,11 +207,23 @@ private:
     }
 
     bool is_news_blackout(int et_hour, int et_min) const {
-        // CPI/FOMC typically at 8:30, 10:00, 14:00 ET.
-        // Simple approach: block for news_blackout_min minutes each side of common times.
-        // In production, wire up a news schedule; this is the safety net.
-        (void)et_hour; (void)et_min;
-        return false;  // stub — real impl would check a schedule
+        // Block entries news_blackout_min minutes before/after common high-impact times (ET):
+        // 08:30 — CPI, NFP, PPI, retail sales
+        // 10:00 — ISM, consumer confidence
+        // 14:00 — FOMC rate decisions (Wed only, but block daily as safety net)
+        // 14:30 — FOMC press conference
+        struct NewsTime { int hour; int min; };
+        static constexpr NewsTime kNewsTimes[] = {
+            {8, 30}, {10, 0}, {14, 0}, {14, 30}
+        };
+        const int now_min = et_hour * 60 + et_min;
+        const int buf = cfg_.news_blackout_min;
+        for (const auto& t : kNewsTimes) {
+            int news_min = t.hour * 60 + t.min;
+            if (now_min >= news_min - buf && now_min <= news_min + buf)
+                return true;
+        }
+        return false;
     }
 
     void handle_completed_bar(const MinuteBar& bar, int et_hour, int et_min) {
