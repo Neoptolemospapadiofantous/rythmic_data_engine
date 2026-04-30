@@ -148,16 +148,49 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
     This is NOT a stub — it queries the trades table synchronously.
     """
     today = datetime.datetime.now(tz=ET).date()
+    open_row = None
     with conn.cursor() as cur:
+        # Check Python-managed trades table
         cur.execute("""
-            SELECT * FROM trades
+            SELECT *, 'python' AS _source FROM trades
             WHERE session_date = %s
               AND exit_time IS NULL
               AND source = 'python'
             ORDER BY entry_time DESC
             LIMIT 1
         """, (today,))
-        row = cur.fetchone()
+        open_row = cur.fetchone()
+
+        # Also check C++ executor's live_trades table for open positions
+        try:
+            cur.execute("""
+                SELECT id, direction, entry_price, stop_loss, target, entry_time
+                FROM live_trades
+                WHERE trade_date = %s
+                  AND exit_time IS NULL
+                ORDER BY entry_time DESC
+                LIMIT 1
+            """, (today,))
+            cpp_row = cur.fetchone()
+        except Exception:
+            cpp_row = None  # live_trades table may not exist in all environments
+
+    if cpp_row is not None:
+        if open_row is not None:
+            log.critical(
+                "position_reconciliation: DUPLICATE OPEN POSITION — "
+                "python trades id=%s AND live_trades id=%s both open for %s. "
+                "Manual intervention required.",
+                open_row["id"], cpp_row["id"], today
+            )
+        else:
+            log.warning(
+                "position_reconciliation: C++ executor has open position in live_trades "
+                "(id=%s direction=%s entry=%s) but no matching python trades record — "
+                "possible crash recovery scenario",
+                cpp_row["id"], cpp_row["direction"], cpp_row["entry_price"]
+            )
+    row = open_row
 
     if row is None:
         log.info("position_reconciliation: no open position found for %s", today)
