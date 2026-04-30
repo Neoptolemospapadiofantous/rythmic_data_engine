@@ -48,6 +48,8 @@ private:
     static std::string now_iso();
     static std::string sev_str(Severity s);
 
+    static constexpr size_t MAX_BUF = 10000;
+
     PGconn*           conn_;
     mutable std::mutex mu_;
     std::vector<Event> buf_;

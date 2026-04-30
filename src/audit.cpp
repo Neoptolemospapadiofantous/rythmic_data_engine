@@ -32,6 +32,7 @@ void AuditLog::log(const std::string& event,
                    const std::string& details,
                    Severity           severity) {
     std::lock_guard lock(mu_);
+    if (buf_.size() >= MAX_BUF) buf_.erase(buf_.begin());  // drop oldest to prevent OOM
     buf_.push_back({now_iso(), event, sev_str(severity), details});
 }
 
@@ -60,30 +61,46 @@ void AuditLog::flush() {
         batch.swap(buf_);
     }
 
-    // Build a single multi-row INSERT
-    std::string sql =
-        "INSERT INTO audit_log (ts, event, severity, details) VALUES ";
-
-    for (size_t i = 0; i < batch.size(); ++i) {
-        if (i) sql += ',';
-        auto esc_details = [&](const std::string& s) {
-            std::string out;
-            out.reserve(s.size() + 2);
-            out += '\'';
-            for (char c : s) {
-                if (c == '\'') out += "''";
-                else           out += c;
-            }
-            out += '\'';
-            return out;
-        };
-        sql += "('" + batch[i].ts + "',"
-               "'" + batch[i].event + "',"
-               "'" + batch[i].severity + "',"
-               + esc_details(batch[i].details) + ")";
+    // Build parallel param arrays for PQexecParams
+    const int n = static_cast<int>(batch.size());
+    std::vector<const char*> p_ts(n), p_ev(n), p_sev(n), p_det(n);
+    for (int i = 0; i < n; ++i) {
+        p_ts[i]  = batch[i].ts.c_str();
+        p_ev[i]  = batch[i].event.c_str();
+        p_sev[i] = batch[i].severity.c_str();
+        p_det[i] = batch[i].details.c_str();
     }
 
-    PGresult* res = PQexec(conn_, sql.c_str());
+    // Use UNNEST to insert all rows in one parameterized statement
+    // $1..$4 are text[] arrays
+    const char* sql =
+        "INSERT INTO audit_log (ts, event, severity, details)"
+        " SELECT * FROM unnest($1::timestamptz[], $2::varchar[], $3::varchar[], $4::text[])";
+
+    // Helper: wrap vector<const char*> into '{val1,val2,...}' quoted array string
+    auto make_pg_array = [](const std::vector<const char*>& vals) {
+        std::string arr = "{";
+        for (size_t i = 0; i < vals.size(); ++i) {
+            if (i) arr += ',';
+            arr += '"';
+            for (const char* p = vals[i]; *p; ++p) {
+                if (*p == '"' || *p == '\\') arr += '\\';
+                arr += *p;
+            }
+            arr += '"';
+        }
+        arr += '}';
+        return arr;
+    };
+
+    std::string a_ts  = make_pg_array(p_ts);
+    std::string a_ev  = make_pg_array(p_ev);
+    std::string a_sev = make_pg_array(p_sev);
+    std::string a_det = make_pg_array(p_det);
+
+    const char* params[4] = { a_ts.c_str(), a_ev.c_str(), a_sev.c_str(), a_det.c_str() };
+    PGresult* res = PQexecParams(conn_, sql, 4, nullptr, params, nullptr, nullptr, 0);
+
     if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
         LOG("Audit flush error: %s",
             res ? PQresultErrorMessage(res) : "null result");
