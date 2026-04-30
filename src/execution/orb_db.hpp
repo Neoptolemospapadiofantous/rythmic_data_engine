@@ -404,6 +404,15 @@ public:
         PQclear(res);
     }
 
+    // Push current price to any LISTEN live_tick subscribers (non-throwing)
+    void notify_tick(double price) {
+        if (!is_connected()) return;
+        char sql[80];
+        snprintf(sql, sizeof(sql), "NOTIFY live_tick, '%.2f'", price);
+        PGresult* res = PQexec(conn_, sql);
+        if (res) PQclear(res);
+    }
+
 private:
     void ensure_schema() {
         exec(R"(
@@ -498,15 +507,6 @@ private:
 
         LOG("[ORBDB] Schema verified: instrument=%s strategy=%s",
             instrument_.c_str(), strategy_.c_str());
-    }
-
-    // Push current price to any LISTEN live_tick subscribers (non-throwing)
-    void notify_tick(double price) {
-        if (!is_connected()) return;
-        char sql[80];
-        snprintf(sql, sizeof(sql), "NOTIFY live_tick, '%.2f'", price);
-        PGresult* res = PQexec(conn_, sql);
-        if (res) PQclear(res);
     }
 
     // DDL-only helper — used exclusively for schema setup (no user input)
