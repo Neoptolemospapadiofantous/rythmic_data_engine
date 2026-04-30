@@ -1,7 +1,7 @@
 {
   "_comment": "Legends live prop firm overrides \u2014 applied by scripts/use_env.py",
   "dry_run": false,
-  "starting_balance": 49594.48,
+  "starting_balance": 49629.78,
   "symbol": "MNQ",
   "trade_contract": "MNQM6",
   "exchange": "CME",
