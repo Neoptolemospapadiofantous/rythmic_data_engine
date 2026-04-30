@@ -10,6 +10,19 @@
 
 // ── helpers ────────────────────────────────────────────────────────
 
+static std::string redact_pg_password(const std::string& connstr) {
+    std::string result = connstr;
+    auto pos = result.find(" password=");
+    if (pos == std::string::npos) pos = result.find("password=");
+    if (pos != std::string::npos) {
+        auto val_start = result.find('=', pos) + 1;
+        auto val_end = result.find(' ', val_start);
+        if (val_end == std::string::npos) val_end = result.size();
+        result.replace(val_start, val_end - val_start, "***");
+    }
+    return result;
+}
+
 static void pg_check(PGresult* res, const char* ctx) {
     if (!res) throw std::runtime_error(std::string("libpq: null result in ") + ctx);
     auto s = PQresultStatus(res);
@@ -967,7 +980,7 @@ std::optional<double> TickDB::latest_price() {
 
 DBSummary TickDB::summary() {
     DBSummary s;
-    s.connstr    = connstr_;
+    s.connstr    = redact_pg_password(connstr_);
     s.tick_count = row_count();
     s.price      = latest_price();
 
