@@ -1043,16 +1043,16 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             if (db && db->is_connected()) {
                 const auto& sess = strategy.session();
                 try {
-                    double cur_equity = orb_cfg.starting_balance + risk.total_profit();
+                    auto rsnap = risk.snapshot();
                     db->upsert_session(today,
                         sess.orb_set ? strategy.orb_high() : 0.0,
                         sess.orb_set ? strategy.orb_low()  : 0.0,
                         sess.trades_today,
-                        risk.daily_pnl(),
-                        risk.peak_equity(),
+                        rsnap.daily_pnl,
+                        rsnap.peak_equity,
                         risk.halted(),
                         "",
-                        cur_equity);
+                        rsnap.equity);
                 } catch (std::exception& e) {
                     LOG("[EXECUTOR] DB upsert_session failed: %s", e.what());
                     db->reconnect();

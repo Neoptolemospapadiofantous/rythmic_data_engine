@@ -145,6 +145,12 @@ public:
     double total_profit() const { std::lock_guard<std::mutex> lk(mu_); return total_profit_; }
     bool   halted()       const { return halted_.load(std::memory_order_acquire); }
 
+    struct Snapshot { double equity; double peak_equity; double daily_pnl; };
+    Snapshot snapshot() const {
+        std::lock_guard<std::mutex> lk(mu_);
+        return { equity_, peak_equity_, daily_pnl_ };
+    }
+
 private:
     void halt(const std::string& reason) {
         halted_      = true;
