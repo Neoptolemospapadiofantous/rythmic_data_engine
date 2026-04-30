@@ -1407,33 +1407,6 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         }
     }
 
-    // Test-order hook: fire one BUY+SELL round-trip when NQ_FIRE_TEST_ORDER is set
-    if (std::getenv("NQ_FIRE_TEST_ORDER") != nullptr) {
-        LOG("[TEST] NQ_FIRE_TEST_ORDER set — firing BUY %s MKT qty=1", orb_cfg.symbol.c_str());
-        std::string buy_basket = "NQ-testbuy-" + std::to_string(std::time(nullptr));
-        order_plant->send_new_order(buy_basket, orb_cfg.symbol, orb_cfg.exchange,
-                                    1, 2, true, 0.0, "test-buy", false);
-        {
-            asio::steady_timer t(ex, std::chrono::seconds(4));
-            co_await t.async_wait(asio::use_awaitable);
-        }
-        if (std::getenv("NQ_TEST_BUY_ONLY") != nullptr) {
-            LOG("[TEST] NQ_TEST_BUY_ONLY — skipping SELL; position remains LONG");
-        } else {
-        LOG("[TEST] Firing SELL %s MKT qty=1 to flatten", orb_cfg.symbol.c_str());
-        std::string sell_basket = "NQ-testsell-" + std::to_string(std::time(nullptr));
-        order_plant->send_new_order(sell_basket, orb_cfg.symbol, orb_cfg.exchange,
-                                    1, 2, false, 0.0, "test-sell", false);
-        }
-        {
-            asio::steady_timer t(ex, std::chrono::seconds(5));
-            co_await t.async_wait(asio::use_awaitable);
-        }
-        LOG("[TEST] Round-trip complete — exiting");
-        g_running = false;
-        ioc_ref.stop();
-        co_return;
-    }
 
 #ifdef USE_RAPI_SDK
     // ── Native R|API+ TCP market-data feed ───────────────────────────────────
