@@ -125,11 +125,11 @@ struct OrbConfig {
     std::string pg_password;
 
     std::string pg_connstr() const {
-        return "host="      + pg_host     +
-               " port="     + pg_port     +
-               " dbname="   + pg_db       +
-               " user="     + pg_user     +
-               " password=" + pg_password +
+        return "host="      + pg_escape_kv(pg_host)     +
+               " port="     + pg_escape_kv(pg_port)     +
+               " dbname="   + pg_escape_kv(pg_db)       +
+               " user="     + pg_escape_kv(pg_user)     +
+               " password=" + pg_escape_kv(pg_password) +
                " connect_timeout=10"
                " application_name=nq_executor";
     }
@@ -237,6 +237,19 @@ struct OrbConfig {
     }
 
 private:
+    // Wrap a libpq keyword=value value in single quotes, escaping ' and \.
+    // Prevents injection via crafted host/password values (H-SEC-3).
+    static std::string pg_escape_kv(const std::string& v) {
+        std::string out = "'";
+        for (char c : v) {
+            if (c == '\'') out += "\\'";
+            else if (c == '\\') out += "\\\\";
+            else out += c;
+        }
+        out += "'";
+        return out;
+    }
+
     // Simple JSON field extractors (no deps)
     static int json_int(const std::string& s, const std::string& key, int def) {
         auto pos = s.find("\"" + key + "\"");
