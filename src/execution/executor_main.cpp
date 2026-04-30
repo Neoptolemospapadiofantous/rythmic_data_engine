@@ -403,7 +403,6 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
             carried_pos.direction == OrbSignal::BUY ? "LONG" : "SHORT",
             carried_pos.entry_price, carried_pos.sl_price);
         strategy.halt_trading("reconnect_unreconciled_position");
-        audit_log.error("risk.halted", "reconnect with non-flat carried position — halting new entries");
     }
     carried_pos = Position{};  // reset; will be populated again at session end
 
