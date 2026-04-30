@@ -1030,8 +1030,8 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         risk.daily_pnl(),
                         risk.peak_equity(),
                         risk.halted(),
-                        "");
-                    db->write_account_equity(today, cur_equity);
+                        "",
+                        cur_equity);
                 } catch (std::exception& e) {
                     LOG("[EXECUTOR] DB upsert_session failed: %s", e.what());
                     db->reconnect();

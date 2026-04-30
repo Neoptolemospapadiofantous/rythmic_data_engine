@@ -141,8 +141,9 @@ public:
                         double daily_pnl,
                         double peak_equity,
                         bool risk_halted,
-                        const std::string& halt_reason) {
-        char p4[32], p5[32], p6[32], p7[16], p8[32], p9[32];
+                        const std::string& halt_reason,
+                        double account_equity = -1.0) {
+        char p4[32], p5[32], p6[32], p7[16], p8[32], p9[32], p12[32];
         snprintf(p4, sizeof(p4), "%.4f", orb_high);
         snprintf(p5, sizeof(p5), "%.4f", orb_low);
         snprintf(p6, sizeof(p6), "%.4f", orb_high - orb_low);
@@ -150,8 +151,11 @@ public:
         snprintf(p8, sizeof(p8), "%.4f", daily_pnl);
         snprintf(p9, sizeof(p9), "%.4f", peak_equity);
         const char* p10 = risk_halted ? "t" : "f";
+        // Use provided account_equity, or fall back to peak_equity if not supplied
+        double aeq = (account_equity >= 0.0) ? account_equity : peak_equity;
+        snprintf(p12, sizeof(p12), "%.4f", aeq);
 
-        const char* params[11] = {
+        const char* params[12] = {
             trade_date.c_str(),    // $1  session_date
             instrument_.c_str(),   // $2  instrument
             strategy_.c_str(),     // $3  strategy
@@ -162,22 +166,24 @@ public:
             p8,                    // $8  daily_pnl_usd
             p9,                    // $9  peak_equity
             p10,                   // $10 risk_halted
-            halt_reason.c_str()    // $11 halt_reason
+            halt_reason.c_str(),   // $11 halt_reason
+            p12                    // $12 account_equity
         };
 
         exec_params(
             "INSERT INTO live_sessions"
             "(session_date, instrument, strategy, orb_high, orb_low, orb_range, trades_taken,"
-            " daily_pnl_usd, peak_equity, risk_halted, halt_reason)"
+            " daily_pnl_usd, peak_equity, risk_halted, halt_reason, account_equity)"
             " VALUES ($1::date, $2, $3,"
             " $4::double precision, $5::double precision, $6::double precision, $7::int,"
-            " $8::double precision, $9::double precision, $10::boolean, $11)"
+            " $8::double precision, $9::double precision, $10::boolean, $11, $12::double precision)"
             " ON CONFLICT (session_date, instrument, strategy) DO UPDATE SET"
             " orb_high=EXCLUDED.orb_high, orb_low=EXCLUDED.orb_low,"
             " orb_range=EXCLUDED.orb_range, trades_taken=EXCLUDED.trades_taken,"
             " daily_pnl_usd=EXCLUDED.daily_pnl_usd, peak_equity=EXCLUDED.peak_equity,"
-            " risk_halted=EXCLUDED.risk_halted, halt_reason=EXCLUDED.halt_reason",
-            11, params);
+            " risk_halted=EXCLUDED.risk_halted, halt_reason=EXCLUDED.halt_reason,"
+            " account_equity=EXCLUDED.account_equity",
+            12, params);
     }
 
     // ── Update account equity for today's session ────────────────────────────
