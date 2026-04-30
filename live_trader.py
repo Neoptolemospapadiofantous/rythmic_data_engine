@@ -212,6 +212,25 @@ def _write_trade_open(conn, session_date: datetime.date, signal: Signal,
     return t.save(conn)
 
 
+def _cancel_trade_open(conn, trade_id: int) -> None:
+    """Mark a pending trade record as cancelled (order submission failed)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE trades SET exit_reason = 'ORDER_FAILED', exit_time = NOW() WHERE id = %s",
+            (trade_id,)
+        )
+    conn.commit()
+
+
+def _update_trade_order_id(conn, trade_id: int, order_id: str) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE trades SET order_id = %s WHERE id = %s", (order_id, trade_id))
+        conn.commit()
+    except Exception:
+        pass  # order_id column optional
+
+
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,
                        exit_reason: str, point_value: float) -> float:
     """Close a trade in the DB and return realized P&L in USD (0.0 if trade not found)."""
@@ -446,12 +465,19 @@ class LiveTrader:
             time.sleep(TICK_POLL_INTERVAL)
 
     def _on_signal(self, signal: Signal) -> None:
+        # Write DB record first so a Rithmic fill always has a corresponding DB entry
+        pending_order_id = f"PENDING-{datetime.datetime.now(datetime.timezone.utc).strftime('%H%M%S%f')}"
+        self._active_trade_id = _write_trade_open(
+            self._conn, self._session_date, signal, pending_order_id, self._dry_run, self._symbol)
         order_id = _submit_order(signal, self._config, self._dry_run, self._log)
         if order_id is None:
-            self._log.error("order submission failed — not entering position")
+            self._log.error("order submission failed — rolling back DB entry")
+            # Mark as cancelled in DB rather than leaving orphaned
+            _cancel_trade_open(self._conn, self._active_trade_id)
+            self._active_trade_id = None
             return
-        self._active_trade_id = _write_trade_open(
-            self._conn, self._session_date, signal, order_id, self._dry_run, self._symbol)
+        # Update DB record with real order_id
+        _update_trade_order_id(self._conn, self._active_trade_id, order_id)
         self._log.info("trade_open id=%s direction=%s entry=%s sl=%s target=%s dry_run=%s",
                        self._active_trade_id, signal.direction, signal.entry_price,
                        signal.stop_loss, signal.target, self._dry_run)
