@@ -585,9 +585,12 @@ def _load_config(path: str) -> dict:
         cfg = json.load(f)
     try:
         from config.live_config_schema import LiveConfig
+    except ModuleNotFoundError as e:
+        raise SystemExit(f"Missing dependency for config validation: {e}. Run: pip install pydantic") from e
+    try:
         LiveConfig.model_validate(cfg)
     except Exception as e:
-        raise SystemExit(f"Config validation failed: {e}")
+        raise SystemExit(f"Config validation failed: {e}") from e
     return cfg
 
 
