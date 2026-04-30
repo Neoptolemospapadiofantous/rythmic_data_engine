@@ -67,9 +67,21 @@ add_executable(test_validator tests/test_validator.cpp)
 target_link_libraries(test_validator PRIVATE rithmic_lib)
 target_include_directories(test_validator PRIVATE src/)
 
+# ── Execution layer unit tests (C3 audit finding) ─────────────────────────────
+# Standalone — no external test framework, no DB, no Rithmic SDK required.
+add_executable(test_risk_manager tests/execution/test_risk_manager.cpp)
+target_include_directories(test_risk_manager PRIVATE src/execution src/)
+target_compile_features(test_risk_manager PRIVATE cxx_std_20)
+
+add_executable(test_orb_strategy tests/execution/test_orb_strategy.cpp)
+target_include_directories(test_orb_strategy PRIVATE src/execution src/)
+target_compile_features(test_orb_strategy PRIVATE cxx_std_20)
+
 enable_testing()
-add_test(NAME db_tests        COMMAND test_db)
-add_test(NAME validator_tests COMMAND test_validator)
+add_test(NAME db_tests            COMMAND test_db)
+add_test(NAME validator_tests     COMMAND test_validator)
+add_test(NAME risk_manager_tests  COMMAND test_risk_manager)
+add_test(NAME orb_strategy_tests  COMMAND test_orb_strategy)
 
 # ── Dashboard (ncurses TUI) ────────────────────────────────────────
 add_executable(dashboard src/dashboard.cpp)
