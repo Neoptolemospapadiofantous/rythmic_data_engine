@@ -104,9 +104,12 @@ void AuditLog::flush() {
     if (!res || PQresultStatus(res) != PGRES_COMMAND_OK) {
         LOG("Audit flush error: %s",
             res ? PQresultErrorMessage(res) : "null result");
-        // Re-queue the events so they aren't lost
+        // Re-queue the events so they aren't lost; trim to MAX_BUF (drop oldest) if needed
         std::lock_guard lock(mu_);
         buf_.insert(buf_.begin(), batch.begin(), batch.end());
+        if (buf_.size() > MAX_BUF)
+            buf_.erase(buf_.begin(),
+                       buf_.begin() + static_cast<std::ptrdiff_t>(buf_.size() - MAX_BUF));
     }
     if (res) PQclear(res);
 }
