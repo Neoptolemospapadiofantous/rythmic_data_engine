@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>NQ ORB — Live Trading Dashboard</title>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -14,7 +15,7 @@
       padding: 1.5rem;
     }
     h1 { font-size: 1.2rem; color: #58a6ff; margin-bottom: 1.5rem; letter-spacing: 0.05em; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
     .card {
       background: #161b22;
       border: 1px solid #30363d;
@@ -56,6 +57,82 @@
     .ok  { color: #3fb950; }
     .err { color: #f85149; }
     #reconnect-failures { color: #f85149; }
+
+    /* ORB chart section */
+    #chart-section {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      padding: 1rem;
+      transition: border-color 0.4s;
+    }
+    #chart-section.phase-building { border-color: #e3b341; }
+    #chart-section.phase-running  { border-color: #58a6ff; }
+    #chart-section.phase-in-pos   { border-color: #3fb950; }
+    #chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 0.75rem;
+    }
+    #chart-header h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #8b949e;
+    }
+    #orb-phase-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      color: #8b949e;
+      margin-left: 0.6rem;
+    }
+    #orb-state-badge {
+      font-size: 0.75rem;
+      font-weight: bold;
+      padding: 0.2rem 0.6rem;
+      border-radius: 3px;
+      background: #21262d;
+      letter-spacing: 0.06em;
+    }
+    #orb-progress {
+      font-size: 0.72rem;
+      color: #8b949e;
+      margin-top: 0.2rem;
+    }
+    .bar-pip {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 2px;
+      margin-right: 3px;
+      background: #30363d;
+      vertical-align: middle;
+    }
+    .bar-pip.filled { background: #e3b341; }
+    #orb-levels {
+      display: flex;
+      gap: 1.5rem;
+      margin-bottom: 0.5rem;
+      font-size: 0.8rem;
+    }
+    #orb-levels span { color: #8b949e; }
+    #orb-levels strong { color: #c9d1d9; }
+    #chart-container {
+      width: 100%;
+      height: 340px;
+      position: relative;
+    }
+    #chart-waiting {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #484f58;
+      font-size: 0.85rem;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -125,8 +202,256 @@
 
   </div>
 
+  <!-- ORB Chart -->
+  <div id="chart-section">
+    <div id="chart-header">
+      <div>
+        <h2 id="chart-title">5m ORB Chart — MNQ</h2>
+      </div>
+      <div style="text-align:right">
+        <span id="orb-state-badge">WAITING</span>
+        <div id="orb-phase-label">waiting for session open</div>
+        <div id="orb-progress"></div>
+      </div>
+    </div>
+    <div id="orb-levels">
+      <div><span>ORB High: </span><strong id="lbl-orb-high">—</strong></div>
+      <div><span>ORB Low: </span><strong id="lbl-orb-low">—</strong></div>
+      <div><span>Entry: </span><strong id="lbl-entry">—</strong></div>
+      <div><span>Stop: </span><strong id="lbl-stop">—</strong></div>
+    </div>
+    <div id="chart-container">
+      <div id="chart-waiting">Waiting for bar data (RTH opens 09:30 ET)…</div>
+    </div>
+  </div>
+
   <script>
     "use strict";
+
+    // ── Chart setup ────────────────────────────────────────────────────────────
+    const chartEl = document.getElementById("chart-container");
+    const chart = LightweightCharts.createChart(chartEl, {
+      width: chartEl.clientWidth,
+      height: 340,
+      layout: { background: { color: "#161b22" }, textColor: "#8b949e" },
+      grid: { vertLines: { color: "#21262d" }, horzLines: { color: "#21262d" } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: "#30363d" },
+      timeScale: { borderColor: "#30363d", timeVisible: true, secondsVisible: false },
+    });
+
+    const candleSeries = chart.addCandlestickSeries({
+      upColor: "#3fb950",
+      downColor: "#f85149",
+      borderUpColor: "#3fb950",
+      borderDownColor: "#f85149",
+      wickUpColor: "#3fb950",
+      wickDownColor: "#f85149",
+    });
+
+    const orbHighLine = chart.addLineSeries({
+      color: "#e3b341",
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    const orbLowLine = chart.addLineSeries({
+      color: "#e3b341",
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    const entryLine = chart.addLineSeries({
+      color: "#58a6ff",
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Solid,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+    const stopLine = chart.addLineSeries({
+      color: "#f85149",
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dotted,
+      priceLineVisible: false,
+      lastValueVisible: false,
+    });
+
+    window.addEventListener("resize", () => {
+      chart.resize(chartEl.clientWidth, 340);
+    });
+
+    // ── Phase labels & colours ─────────────────────────────────────────────────
+    const STATE_META = {
+      WAITING:      { color: "#8b949e", phase: "waiting for session open", css: "" },
+      ORB_BUILDING: { color: "#e3b341", phase: "calculating opening range", css: "phase-building" },
+      WATCHING:     { color: "#58a6ff", phase: "strategy running — watching for breakout", css: "phase-running" },
+      IN_POSITION:  { color: "#3fb950", phase: "strategy running — position open", css: "phase-in-pos" },
+      FLAT:         { color: "#484f58", phase: "session ended", css: "" },
+    };
+
+    function applyStateBadge(state, barsBuilt, orbMinutes) {
+      const meta = STATE_META[state] || { color: "#c9d1d9", phase: "", css: "" };
+      const badge = document.getElementById("orb-state-badge");
+      badge.textContent = state;
+      badge.style.color = meta.color;
+
+      document.getElementById("orb-phase-label").textContent = meta.phase;
+
+      // Update card border to reflect phase
+      const section = document.getElementById("chart-section");
+      section.className = meta.css ? meta.css : "";
+
+      // Render bar progress pips during ORB building
+      const prog = document.getElementById("orb-progress");
+      if (state === "ORB_BUILDING" && orbMinutes) {
+        const n = Math.min(barsBuilt, orbMinutes);
+        let html = "";
+        for (let i = 0; i < orbMinutes; i++) {
+          html += `<span class="bar-pip${i < n ? " filled" : ""}"></span>`;
+        }
+        prog.innerHTML = `bars: ${html} ${n}/${orbMinutes}`;
+      } else {
+        prog.innerHTML = "";
+      }
+    }
+
+    // ── ORB chart update ───────────────────────────────────────────────────────
+    function tsToUnix(tsStr) {
+      // ISO string → Unix seconds (lightweight-charts time axis)
+      return Math.floor(new Date(tsStr).getTime() / 1000);
+    }
+
+    let lastBarCount = 0;
+
+    async function pollORB() {
+      try {
+        const res = await fetch("/api/live/orb");
+        if (!res.ok) return;
+        const d = await res.json();
+
+        // Update chart title with actual orb_minutes
+        if (d.orb_minutes) {
+          document.getElementById("chart-title").textContent =
+            `${d.orb_minutes}m ORB Chart — MNQ`;
+        }
+
+        const bars = d.orb_bars || [];
+        const orbMins = d.orb_minutes || 5;
+
+        // Count bars in the ORB_BUILDING window (first N bars of RTH)
+        const barsBuilt = d.strategy_state === "ORB_BUILDING" ? bars.length : orbMins;
+        applyStateBadge(d.strategy_state || "WAITING", barsBuilt, orbMins);
+
+        if (bars.length === 0) return;
+
+        document.getElementById("chart-waiting").style.display = "none";
+
+        // Convert bars → lightweight-charts format
+        const candles = bars.map(b => ({
+          time: tsToUnix(b.ts),
+          open: b.open,
+          high: b.high,
+          low: b.low,
+          close: b.close,
+        })).sort((a, b) => a.time - b.time);
+
+        // Only re-set if bar count changed (avoid redraw flicker on every poll)
+        if (bars.length !== lastBarCount) {
+          // Colour the first N bars amber to mark the opening range period
+          const colored = candles.map((c, i) => {
+            if (i < orbMins) {
+              return { ...c, color: "#e3b341", borderColor: "#e3b341", wickColor: "#e3b341" };
+            }
+            return c;
+          });
+          candleSeries.setData(colored);
+          lastBarCount = bars.length;
+          chart.timeScale().fitContent();
+        }
+
+        // ORB high/low horizontal lines (extend across all bars)
+        if (d.orb_high != null && d.orb_low != null) {
+          const times = candles.map(c => c.time);
+          const t0 = times[0], t1 = times[times.length - 1];
+          orbHighLine.setData([{ time: t0, value: d.orb_high }, { time: t1, value: d.orb_high }]);
+          orbLowLine.setData([{ time: t0, value: d.orb_low }, { time: t1, value: d.orb_low }]);
+          document.getElementById("lbl-orb-high").textContent = d.orb_high.toFixed(2);
+          document.getElementById("lbl-orb-low").textContent = d.orb_low.toFixed(2);
+        }
+
+        // Entry / stop lines
+        if (d.entry_price != null) {
+          const times = candles.map(c => c.time);
+          const t0 = times[0], t1 = times[times.length - 1];
+          entryLine.setData([{ time: t0, value: d.entry_price }, { time: t1, value: d.entry_price }]);
+          document.getElementById("lbl-entry").textContent = d.entry_price.toFixed(2);
+        } else {
+          entryLine.setData([]);
+          document.getElementById("lbl-entry").textContent = "—";
+        }
+
+        if (d.sl != null) {
+          const times = candles.map(c => c.time);
+          const t0 = times[0], t1 = times[times.length - 1];
+          stopLine.setData([{ time: t0, value: d.sl }, { time: t1, value: d.sl }]);
+          document.getElementById("lbl-stop").textContent = d.sl.toFixed(2);
+        } else {
+          stopLine.setData([]);
+          document.getElementById("lbl-stop").textContent = "—";
+        }
+
+      } catch (_) { /* ignore transient errors */ }
+    }
+
+    // ── Full state polling ─────────────────────────────────────────────────────
+    async function pollState() {
+      try {
+        const res = await fetch("/api/live/state");
+        if (!res.ok) return;
+        const d = await res.json();
+
+        // Position panel
+        const side = document.getElementById("pos-side");
+        side.textContent = d.position || "FLAT";
+        side.className = "metric-value " + (d.position === "LONG" ? "long"
+                                          : d.position === "SHORT" ? "short" : "flat");
+        document.getElementById("pos-entry").textContent =
+          d.entry_price != null ? d.entry_price.toFixed(2) : "—";
+        document.getElementById("pos-sl").textContent =
+          d.sl != null ? d.sl.toFixed(2) : "—";
+
+        const pnl = d.unrealized_pnl ?? 0;
+        const pnlEl = document.getElementById("pos-pnl");
+        pnlEl.textContent = (pnl >= 0 ? "+" : "") + pnl.toFixed(2);
+        pnlEl.className = "metric-value " + (pnl >= 0 ? "pnl-positive" : "pnl-negative");
+
+        const dpnl = d.daily_pnl ?? 0;
+        const dpnlEl = document.getElementById("daily-pnl");
+        dpnlEl.textContent = (dpnl >= 0 ? "+" : "") + dpnl.toFixed(2);
+        dpnlEl.className = "metric-value " + (dpnl >= 0 ? "pnl-positive" : "pnl-negative");
+
+        // Connection panel
+        const conn = d.connection || "UNKNOWN";
+        const dot = document.getElementById("conn-dot");
+        const lbl = document.getElementById("conn-label");
+        dot.className = "status-dot " + (conn === "CONNECTED" ? "connected" : "disconnected");
+        lbl.textContent = conn;
+
+        if (d.last_tick_ts) {
+          const ago = Math.round((Date.now() - new Date(d.last_tick_ts).getTime()) / 1000);
+          document.getElementById("last-tick").textContent = ago + "s ago";
+        }
+        document.getElementById("reconnect-failures").textContent =
+          d.reconnect_failures ?? "—";
+        document.getElementById("trader-running").textContent =
+          d.running ? "YES" : "NO";
+
+        const btn = document.getElementById("kill-btn");
+        if (d.running) btn.disabled = false;
+      } catch (_) { /* ignore transient fetch errors */ }
+    }
 
     // ── Kill switch ────────────────────────────────────────────────────────────
     async function killTrader() {
@@ -160,21 +485,11 @@
       }
     }
 
-    // ── Status polling ─────────────────────────────────────────────────────────
-    async function pollStatus() {
-      try {
-        const res = await fetch("/api/live/status");
-        const data = await res.json();
-        document.getElementById("trader-running").textContent = data.running ? "YES" : "NO";
-        const btn = document.getElementById("kill-btn");
-        // Re-enable kill button only if trader is actually running
-        if (data.running) btn.disabled = false;
-      } catch (_) { /* ignore transient fetch errors */ }
-    }
-
-    // Poll process status every 5 seconds
-    pollStatus();
-    setInterval(pollStatus, 5000);
+    // ── Startup polling ────────────────────────────────────────────────────────
+    pollState();
+    pollORB();
+    setInterval(pollState, 5000);
+    setInterval(pollORB, 5000);
   </script>
 </body>
 </html>

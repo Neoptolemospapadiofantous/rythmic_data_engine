@@ -101,3 +101,43 @@ def trader_status():
     pid = _read_pid()
     running = pid is not None and _process_is_alive(pid)
     return jsonify({"running": running, "pid": pid})
+
+
+_DEFAULT_STATE_FILE = Path("data/live_state.json")
+
+
+def _read_state() -> dict | None:
+    path = Path(current_app.config.get("LIVE_TRADER_STATE_FILE", str(_DEFAULT_STATE_FILE)))
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+@live_bp.get("/api/live/state")
+def trader_state():
+    """Return full live trader state (position, P&L, connection, ORB data)."""
+    state = _read_state()
+    if state is None:
+        return jsonify({"error": "state file unavailable"}), 404
+    pid = _read_pid()
+    state["running"] = pid is not None and _process_is_alive(pid)
+    return jsonify(state)
+
+
+@live_bp.get("/api/live/orb")
+def orb_state():
+    """Return ORB-specific data for the chart: bars, high/low, strategy state."""
+    state = _read_state()
+    if state is None:
+        return jsonify({"error": "state file unavailable"}), 404
+    return jsonify({
+        "orb_high": state.get("orb_high"),
+        "orb_low": state.get("orb_low"),
+        "strategy_state": state.get("strategy_state", "UNKNOWN"),
+        "orb_minutes": state.get("orb_minutes", 5),
+        "orb_bars": state.get("orb_bars", []),
+        "position": state.get("position", "FLAT"),
+        "entry_price": state.get("entry_price"),
+        "sl": state.get("sl"),
+    })

@@ -1,0 +1,1200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Rithmic Engine — Architecture</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<style>
+  :root {
+    --bg:     #0d1117;
+    --bg2:    #161b22;
+    --bg3:    #21262d;
+    --border: #30363d;
+    --text:   #e6edf3;
+    --text2:  #8b949e;
+    --blue:   #58a6ff;
+    --green:  #3fb950;
+    --yellow: #d29922;
+    --red:    #f85149;
+    --purple: #bc8cff;
+    --cyan:   #39d353;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 28px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  header h1 { font-size: 16px; font-weight: 600; color: var(--text); }
+  header span { font-size: 11px; color: var(--text2); background: var(--bg3);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
+
+  nav {
+    display: flex;
+    gap: 4px;
+    padding: 10px 28px;
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  nav a {
+    color: var(--text2);
+    text-decoration: none;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+  }
+  nav a:hover { background: var(--bg3); border-color: var(--border); color: var(--text); }
+
+  main { padding: 28px; max-width: 1400px; margin: 0 auto; }
+
+  section { margin-bottom: 48px; }
+  section h2 {
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--text2);
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  section h2::before { content: ''; display: block; width: 3px; height: 14px;
+    background: var(--blue); border-radius: 2px; }
+
+  .card {
+    background: var(--bg2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    overflow-x: auto;
+  }
+  .card .mermaid { min-width: 600px; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) {
+    .grid2, .grid3 { grid-template-columns: 1fr; }
+  }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 12px;
+    margin-top: 12px; font-size: 11px;
+  }
+  .legend span { display: flex; align-items: center; gap: 5px; color: var(--text2); }
+  .legend i { display: block; width: 10px; height: 10px; border-radius: 2px; }
+
+  .tag {
+    display: inline-block; font-size: 10px; padding: 1px 6px;
+    border-radius: 3px; font-family: monospace; margin-left: 6px;
+  }
+  .tag-py  { background: #1f6feb33; color: var(--blue); border: 1px solid #1f6feb55; }
+  .tag-cpp { background: #3fb95033; color: var(--green); border: 1px solid #3fb95055; }
+  .tag-db  { background: #bc8cff33; color: var(--purple); border: 1px solid #bc8cff55; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Rithmic Engine Architecture</h1>
+  <span>MNQ / ORB Strategy</span>
+  <span style="background:#2e2a1a;border-color:#d29922;color:#d29922;" title="Updated 2026-05-02: systemd wired, order-flow features live, Slack alerts">v2 · 2026-05-02</span>
+  <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">systemd ✓</span>
+  <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">order-flow ✓</span>
+  <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">alerts ✓</span>
+  <span style="margin-left:auto;color:var(--text2);font-size:11px;">Oracle VM · 170.9.233.177</span>
+</header>
+
+<nav>
+  <a href="#overview">System Overview</a>
+  <a href="#dataflow">Data Flow</a>
+  <a href="#processcontrol">Process Control</a>
+  <a href="#alerts">Alerts</a>
+  <a href="#orderflow">Order-Flow Features</a>
+  <a href="#statemachine">Strategy State Machine</a>
+  <a href="#livetrader">Python Live Trader</a>
+  <a href="#cppexecutor">C++ Executor</a>
+  <a href="#collector">Collector Pipeline</a>
+  <a href="#config">Config Schema</a>
+  <a href="#database">Database Schema</a>
+  <a href="#preflight">Preflight Gates</a>
+</nav>
+
+<main>
+
+<!-- ─── SYSTEM OVERVIEW ─────────────────────────────────────────────── -->
+<section id="overview">
+  <h2>System Overview <span class="tag tag-py">Python</span><span class="tag tag-cpp">C++</span></h2>
+  <div class="card">
+    <div class="mermaid">
+graph TB
+    subgraph RITHMIC ["☁ Rithmic Cloud"]
+        MD["MD Plant\nwss://ritpz01001"]
+        OP["Order Plant\nwss://ritpz01001"]
+    end
+
+    subgraph ORACLE ["🖥 Oracle VM · 170.9.233.177"]
+        SYSTEMD["⚙ systemd\nnq_executor.service\nRestart=on-failure · RestartSec=30s\nTimeoutStop=30s · EnvironmentFile=.env"]
+
+        subgraph COLLECTOR ["Collector  (C++)"]
+            RC["RithmicClient\nBoost.Beast WS"]
+            COL["Collector\nbuffered flush"]
+            WAL["Wal\nwrite-ahead log"]
+            SEN["DataSentinel\nanomaly detection"]
+            AUD["AuditLog\nevent buffer"]
+        end
+
+        subgraph EXECUTOR ["nq_executor  (C++)"]
+            CFG["OrbConfig\nfrom_file()"]
+            ORB["OrbStrategy\non_tick()"]
+            OM["OrderManager\non_signal()"]
+            RM["RiskManager\ncan_trade()"]
+            OPC["Order Plant Client\nWS connection"]
+        end
+
+        subgraph PYTHON ["live_trader.py  (Python)"]
+            LT["LiveTrader\n_loop()"]
+            STRAT["MicroORBStrategy\non_bar() / on_tick()"]
+            ML["ML Model\nXGBoost + scaler"]
+        end
+
+        PG[("PostgreSQL\nTimescaleDB\nrithmic DB")]
+    end
+
+    subgraph LOCAL ["💻 Local Machine"]
+        BE["FastAPI Backend\nbot/ui/app.py\ncpp_engine.py router"]
+        FE["Next.js Dashboard\nlocalhost:3000"]
+    end
+
+    SLACK["💬 Slack\nWebhook"]
+
+    MD -->|"protobuf ticks"| RC
+    RC --> COL
+    COL --> WAL
+    COL --> SEN
+    COL --> AUD
+    COL -->|"TickDB.write()"| PG
+
+    SYSTEMD -->|"ExecStart\nnq_executor --config"| EXECUTOR
+    SYSTEMD -.->|"Restart=on-failure"| EXECUTOR
+
+    CFG --> ORB
+    CFG --> OM
+    CFG --> RM
+    OM --> RM
+    MD -->|"MD ticks"| ORB
+    ORB -->|"OrbSignal"| OM
+    OM -->|"orders"| OPC
+    OPC --> OP
+    OP -->|"fills"| OPC
+    OPC -->|"on_fill"| OM
+    OM -->|"live_position ORB"| PG
+    OM -->|"live_trades"| PG
+
+    PG -->|"_poll_bars_since()\n+ask_volume +bid_volume"| LT
+    LT --> STRAT
+    STRAT --> ML
+    STRAT -->|"Signal"| LT
+    LT -->|"live_position ORB_PY"| PG
+    LT -->|"live_trades dry_run"| PG
+    LT -->|"_send_alert()"| SLACK
+
+    PG -->|"_fetch_merged_position()"| BE
+    BE -->|"WebSocket /ws/cpp"| FE
+    FE -->|"POST /api/cpp/start\nPOST /api/cpp/kill"| BE
+    BE -->|"SSH → sudo systemctl\nstart / stop / is-active"| SYSTEMD
+
+    style RITHMIC fill:#1a1f2e,stroke:#30363d
+    style ORACLE fill:#161b22,stroke:#30363d
+    style SYSTEMD fill:#2e2010,stroke:#d29922,stroke-width:2px
+    style COLLECTOR fill:#0d2818,stroke:#3fb950,stroke-width:1px
+    style EXECUTOR fill:#0d1b2e,stroke:#58a6ff,stroke-width:1px
+    style PYTHON fill:#1f1a2e,stroke:#bc8cff,stroke-width:1px
+    style LOCAL fill:#1a1410,stroke:#d29922,stroke-width:1px
+    style SLACK fill:#1a2e1a,stroke:#3fb950,stroke-width:1px
+    </div>
+  </div>
+</section>
+
+<!-- ─── DATA FLOW ────────────────────────────────────────────────────── -->
+<section id="dataflow">
+  <h2>Data Flow</h2>
+  <div class="card">
+    <div class="mermaid">
+sequenceDiagram
+    participant UI as Dashboard (Next.js)
+    participant BE as FastAPI Backend
+    participant SD as systemd (Oracle)
+    participant R as Rithmic MD Plant
+    participant C as RithmicClient (C++)
+    participant COL as Collector (C++)
+    participant DB as PostgreSQL
+    participant PY as LiveTrader (Python)
+    participant STRAT as MicroORBStrategy
+    participant OP as Order Plant
+    participant SL as Slack Webhook
+
+    UI->>BE: POST /api/cpp/start
+    BE->>SD: SSH → sudo systemctl start nq_executor
+    SD->>SD: ExecStartPre: NO_DEPLOY check
+    SD->>SD: EnvironmentFile: load .env
+    SD-->>BE: exit 0 (started)
+    BE-->>UI: { ok: true, pid: N }
+
+    Note over SD,OP: nq_executor running under systemd
+
+    R-->>C: protobuf TickRow (price, size, ts_micros)
+    C->>C: dispatch_message() → TickValidator.valid()
+    C->>COL: on_tick(TickRow)
+    COL->>COL: DataSentinel.observe_tick()
+    COL->>COL: buffer in buf_ (mutex)
+    COL->>DB: flush() → TickDB.write() every 5 ticks / 100ms
+    COL->>COL: Wal.write_batch() [crash safety]
+
+    Note over DB: ticks: is_buy flag → ask_volume / bid_volume per minute bar
+
+    loop every 5s
+        PY->>DB: _poll_bars_since(since_ts)\n+ ask_volume, bid_volume
+        DB-->>PY: list[bar dicts] incl. order-flow volumes
+        PY->>STRAT: on_bar(bar)
+        STRAT->>STRAT: compute_features() → bid_ask_imbalance,\ntrade_aggression, delta_divergence
+        STRAT-->>PY: Signal | None
+    end
+
+    PY->>DB: _write_trade_open()
+    PY->>OP: _submit_order() [dry_run=True → skipped]
+    PY->>SL: _send_alert() ENTRY [live only]
+    PY->>DB: _write_state() → live_position ORB_PY
+
+    Note over DB,OP: C++ executor parallel path (real orders)
+    R-->>C: MD tick to OrbStrategy
+    C->>COL: on_tick → OrbStrategy.on_tick()
+    COL->>DB: OrbStrategy signal → OrderManager
+    DB->>OP: OrderManager.on_signal() → market order
+    OP-->>DB: fill notification → live_position ORB
+
+    UI->>BE: POST /api/cpp/kill
+    BE->>SD: SSH → sudo systemctl stop nq_executor
+    SD->>SD: SIGTERM → 30s grace window (position flatten)
+    SD->>SD: SIGKILL if still alive at 30s
+    SD-->>BE: exit 0 (stopped)
+    BE-->>UI: { ok: true, pid: N }
+    PY->>SL: _send_alert() EMERGENCY FLATTEN [if in position]
+    </div>
+  </div>
+</section>
+
+<!-- ─── PROCESS CONTROL ──────────────────────────────────────────────── -->
+<section id="processcontrol">
+  <h2>Process Control <span class="tag tag-py">cpp_engine.py</span><span class="tag tag-cpp">systemd</span></h2>
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+    FE["Dashboard\n▶ Start ORB  /  ■ Stop ORB"]
+
+    FE -->|"POST /api/cpp/start"| CHK_RUN{"pgrep nq_executor\nalready running?"}
+    CHK_RUN -->|"yes"| ERR1["{ ok: false\nerror: already running (pid N) }"]
+    CHK_RUN -->|"no"| CHK_DEPLOY{"ExecStartPre\nNO_DEPLOY present?"}
+    CHK_DEPLOY -->|"yes"| ERR2["{ ok: false\nerror: NO_DEPLOY lockfile present }"]
+    CHK_DEPLOY -->|"no"| START_CMD["sudo systemctl start nq_executor\n→ EnvironmentFile .env loaded\n→ WorkingDirectory set\n→ nq_executor --config live_config.json"]
+    START_CMD -->|"sleep 2 → pgrep"| OK1["{ ok: true, pid: N }"]
+
+    FE -->|"POST /api/cpp/kill"| CHK_PROC{"pgrep nq_executor\nrunning?"}
+    CHK_PROC -->|"no"| ERR3["{ ok: false\nerror: not running }"]
+    CHK_PROC -->|"yes"| STOP_SYS["sudo systemctl stop nq_executor\n→ SIGTERM to process\n→ 30s grace window (position flatten)"]
+    STOP_SYS --> STILL{"still alive after\nsystemctl stop?"}
+    STILL -->|"no (managed)"| OK2["{ ok: true, pid: N }"]
+    STILL -->|"yes (raw process)"| FALLBACK["kill -TERM pid\nsleep 3\nkill -KILL pid"]
+    FALLBACK --> OK2
+
+    FE -->|"GET /api/cpp/executor-status\nevery 10s"| STATUS["{ running, pid, managed }\npgrep = ground truth\nsystemctl is-active = managed flag"]
+
+    CRASH["nq_executor crash"] --> RESTART["systemd Restart=on-failure\nwait RestartSec=30s\nmax 3 restarts in 300s"]
+    RESTART --> START_CMD
+
+    style ERR1 fill:#2e1a1a,stroke:#f85149
+    style ERR2 fill:#2e1a1a,stroke:#f85149
+    style ERR3 fill:#2e1a1a,stroke:#f85149
+    style OK1 fill:#0d2818,stroke:#3fb950
+    style OK2 fill:#0d2818,stroke:#3fb950
+    style CRASH fill:#2e2010,stroke:#d29922
+    style RESTART fill:#2e2010,stroke:#d29922
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">nq_executor.service — key directives</div>
+    <div style="font-family:monospace;font-size:11px;color:var(--text2);line-height:2;">
+      <span style="color:var(--blue);">EnvironmentFile</span>=<span style="color:var(--green);">/home/opc/rithmic_engine/.env</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># sources .env so RITHMIC_* vars are set</span><br>
+      <span style="color:var(--blue);">ExecStartPre</span>=<span style="color:var(--green);">/bin/bash -c '[ ! -f NO_DEPLOY ] || exit 1'</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># hard gate before launch</span><br>
+      <span style="color:var(--blue);">Restart</span>=<span style="color:var(--green);">on-failure</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--blue);">RestartSec</span>=<span style="color:var(--green);">30s</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--blue);">StartLimitBurst</span>=<span style="color:var(--green);">3</span> <span style="color:var(--text2);">/ 300s</span><br>
+      <span style="color:var(--blue);">KillSignal</span>=<span style="color:var(--green);">SIGTERM</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--blue);">TimeoutStopSec</span>=<span style="color:var(--green);">30s</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--blue);">SendSIGKILL</span>=<span style="color:var(--green);">yes</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># position flatten window then SIGKILL</span><br>
+      <span style="color:var(--blue);">WantedBy</span>=<span style="color:var(--green);">multi-user.target</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># enabled — auto-starts on reboot</span>
+    </div>
+  </div>
+</section>
+
+<!-- ─── ALERTS ────────────────────────────────────────────────────────── -->
+<section id="alerts">
+  <h2>Alert System <span class="tag tag-py">live_trader.py · _send_alert()</span></h2>
+  <div class="card">
+    <div class="mermaid">
+flowchart LR
+    subgraph CONFIG ["Activation"]
+        C1["alerts.enabled: true\nin live_config.json"]
+        C2["SLACK_WEBHOOK_URL\nin .env on Oracle"]
+    end
+
+    subgraph EVENTS ["Trigger Events"]
+        E1[":rotating_light: SIGTERM\nwith open position\n_handle_shutdown()"]
+        E2[":red_circle: DB conn exhausted\nafter max retries\n_pg_connect_with_retry()"]
+        E3[":zap: Trade ENTRY\n_on_signal()\nlive only"]
+        E4[":white_check_mark: Trade EXIT + PnL\n_on_exit()\nlive only"]
+    end
+
+    SA["_send_alert(config, message)\nurllib.request.urlopen()\ntimeout=8s · non-fatal"]
+
+    CONFIG --> SA
+    E1 -->|"on_emergency_flatten"| SA
+    E2 -->|"on_connection_loss"| SA
+    E3 -->|"on_trade_fill + not dry_run"| SA
+    E4 -->|"on_trade_fill + not dry_run"| SA
+    SA -->|"POST application/json\n{text: message}"| SLACK["💬 Slack\nWebhook"]
+
+    DRY["dry_run=True\n→ entry/exit alerts\nsuppressed"]
+
+    style SA fill:#2e2a1a,stroke:#d29922
+    style SLACK fill:#1a2e1a,stroke:#3fb950
+    style DRY fill:#21262d,stroke:#30363d
+    </div>
+  </div>
+</section>
+
+<!-- ─── ORDER-FLOW FEATURES ───────────────────────────────────────────── -->
+<section id="orderflow">
+  <h2>Order-Flow Features <span class="tag tag-py">live_trader.py · features.py</span></h2>
+  <div class="card">
+    <div class="mermaid">
+flowchart LR
+    subgraph TICKS ["ticks hypertable"]
+        T1["ts_event · price · size\nis_buy: bool\n(true = aggressor bought = hit ask)"]
+    end
+
+    subgraph SQL ["_BARS_SELECT — per 1-min bar"]
+        S1["SUM(size) → volume"]
+        S2["SUM(size) FILTER WHERE is_buy = true → ask_volume\n(buy-initiated trades)"]
+        S3["SUM(size) FILTER WHERE is_buy = false → bid_volume\n(sell-initiated trades)"]
+    end
+
+    subgraph FEATURES ["compute_features() — order-flow group"]
+        F1["bid_ask_imbalance\n= (ask_vol - bid_vol) / total\n+1 = all buys · -1 = all sells"]
+        F2["imbalance_ratio\n= max(ask/bid, bid/ask)\n≥ 1.0 always"]
+        F3["trade_aggression\n= last5_ask_sum / last5_total\n>0.5 = buy pressure"]
+        F4["delta_divergence\n= delta_ema5 × price_dir\n>0 = delta confirms move"]
+        F5["volume_delta\n= ask_vol - bid_vol (raw)"]
+        F6["cum_delta\n= Σ(ask-bid) over window"]
+    end
+
+    TICKS --> SQL
+    S2 --> F1
+    S3 --> F1
+    S2 --> F2
+    S3 --> F2
+    S2 --> F3
+    S3 --> F3
+    S2 --> F4
+    S3 --> F4
+    S1 --> F5
+    S2 --> F5
+    S3 --> F5
+    S2 --> F6
+    S3 --> F6
+
+    style TICKS fill:#0d1b2e,stroke:#58a6ff33
+    style SQL fill:#0d2818,stroke:#3fb95033
+    style FEATURES fill:#1f1a2e,stroke:#bc8cff33
+    </div>
+  </div>
+  <div style="margin-top:10px;font-size:11px;color:var(--text2);padding:0 4px;">
+    Previously all six features were constant zero/0.5 — bars only carried <code style="color:var(--blue);">volume</code>.
+    Now <code style="color:var(--blue);">_poll_bars_since()</code> and <code style="color:var(--blue);">_poll_latest_bar()</code>
+    aggregate <code style="color:var(--green);">ask_volume</code> / <code style="color:var(--green);">bid_volume</code>
+    from <code style="color:var(--blue);">is_buy</code> in the ticks table — all six features are live.
+  </div>
+</section>
+
+<!-- ─── STATE MACHINE ────────────────────────────────────────────────── -->
+<section id="statemachine">
+  <h2>Strategy State Machine</h2>
+  <div class="grid2">
+    <div class="card">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">Python — MicroORBStrategy (StrategyState)</div>
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> WAITING : startup / new session date
+
+    WAITING --> ORB_BUILDING : first bar after rth_open 09:30
+
+    ORB_BUILDING --> ORB_BUILDING : on_bar() accumulate high/low
+
+    ORB_BUILDING --> WATCHING : _lock_range() / orb_period complete
+
+    WATCHING --> IN_POSITION : _check_breakout() / breakout confirmed + ML pass
+
+    IN_POSITION --> FLAT : SL / target / trailing stop / eod_flatten()
+
+    FLAT --> WAITING : next session date
+      </div>
+    </div>
+    <div class="card">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">C++ — OrbStrategy (OrbSession / PosState)</div>
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> FLAT : reset_session()
+
+    FLAT --> ORB_BUILDING : tick after session_open
+
+    ORB_BUILDING --> ORB_BUILDING : MinuteBar.update() / build orb range
+
+    ORB_BUILDING --> WATCHING : orb_minutes elapsed / seed_orb_range()
+
+    WATCHING --> PENDING_ENTRY : check_breakout() / OrderManager.on_signal()
+
+    PENDING_ENTRY --> LONG : on_fill_notification(is_entry)
+
+    PENDING_ENTRY --> SHORT : on_fill_notification(is_entry)
+
+    LONG --> PENDING_EXIT : check_trail_and_stop() / flatten_now()
+
+    SHORT --> PENDING_EXIT : check_trail_and_stop() / flatten_now()
+
+    PENDING_EXIT --> FLAT : on_fill_notification not entry / pop_trade_completed()
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ─── PYTHON LIVE TRADER ───────────────────────────────────────────── -->
+<section id="livetrader">
+  <h2>Python Live Trader <span class="tag tag-py">live_trader.py</span></h2>
+  <div class="card">
+    <div class="mermaid">
+classDiagram
+    class LiveTrader {
+        -config dict
+        -dry_run bool
+        -symbol str
+        -conn PGConn
+        -strategy MicroORBStrategy
+        -trade_id int
+        -orb_bars list
+        -last_bar_ts datetime
+        -last_tick_ts datetime
+        -daily_pnl float
+        -reconnect_failures int
+        +start()
+        +_loop()
+        +_replay_historical_bars()
+        +_bar_loop()
+        +_tick_loop()
+        +_on_signal(signal)
+        +_on_exit(exit_price, exit_ts, reason)
+        +_maybe_eod(now_et)
+        +_maybe_watchdog()
+        +_write_state(connection)
+        -_handle_shutdown(signum, frame)
+        -_emergency_flatten(reason)
+    }
+
+    class MicroORBStrategy {
+        -_state StrategyState
+        -_orb_high float
+        -_orb_low float
+        -_orb_bars list
+        -_position Position
+        -_session_date date
+        -_model XGBoostModel
+        -_scaler Scaler
+        +on_bar(bar) Signal
+        +on_tick(tick) str
+        +update_stop(reference_price) float
+        +eod_flatten() bool
+        +current_position() Position
+        -_reset_session(date)
+        -_lock_range()
+        -_check_breakout(bar, ts_et) Signal
+    }
+
+    class Signal {
+        +direction str
+        +entry_price float
+        +stop_loss float
+        +target float
+        +bar_ts datetime
+    }
+
+    class Position {
+        +direction str
+        +entry_price float
+        +stop_loss float
+        +target float
+        +entry_ts datetime
+        +highest_price float
+        +lowest_price float
+    }
+
+    class StrategyState {
+        <<enumeration>>
+        WAITING
+        ORB_BUILDING
+        WATCHING
+        IN_POSITION
+        FLAT
+    }
+
+    LiveTrader --> MicroORBStrategy : uses
+    MicroORBStrategy --> Signal : produces
+    MicroORBStrategy --> Position : manages
+    MicroORBStrategy --> StrategyState : state machine
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">Module-level functions</div>
+    <div class="mermaid">
+graph LR
+    subgraph DB ["Database"]
+        WTO["_write_trade_open(conn, session_date,\nsignal, order_id, dry_run, symbol)\n→ trade_id"]
+        WTC["_write_trade_close(conn, trade_id,\nexit_price, exit_ts, reason,\npoint_value, commission_rt)\n→ pnl"]
+        WS["_write_session_summary(conn,\nsession_date, dry_run, exit_reason)"]
+        CTO["_cancel_trade_open(conn, trade_id)"]
+        UTO["_update_trade_order_id(conn,\ntrade_id, order_id)"]
+    end
+    subgraph Poll ["Polling — via _BARS_SELECT template"]
+        PBS["_poll_bars_since(conn, symbol, since_ts)\n→ list[dict]\nfields: ts, open, high, low, close,\nvolume, ask_volume, bid_volume"]
+        PLB["_poll_latest_bar(conn, symbol, since_ts)\n→ dict | None\nsame fields as _poll_bars_since"]
+        PLT["_poll_latest_tick(conn, symbol, since_ts)\n→ dict | None"]
+    end
+    subgraph Startup ["Startup + Alerts"]
+        RP["_reconcile_position(conn, config,\nstrategy, log) → dict | None"]
+        SO["_submit_order(signal, config,\ndry_run, log) → order_id | None"]
+        CLF["compute_live_features(bars) → dict"]
+        SA["_send_alert(config, message)\n→ Slack webhook\ngated by alerts.enabled +\nSLACK_WEBHOOK_URL env var"]
+    end
+
+    style DB fill:#0d1b2e,stroke:#58a6ff33
+    style Poll fill:#0d2818,stroke:#3fb95033
+    style Startup fill:#1f1a2e,stroke:#bc8cff33
+    </div>
+  </div>
+</section>
+
+<!-- ─── C++ EXECUTOR ─────────────────────────────────────────────────── -->
+<section id="cppexecutor">
+  <h2>C++ Executor <span class="tag tag-cpp">src/execution/</span></h2>
+  <div class="card">
+    <div class="mermaid">
+classDiagram
+    class OrbConfig {
+        +orb_minutes: int = 15
+        +sl_points: double = 15.0
+        +trail_be_trigger: double = 3.0
+        +trail_step: double = 10.0
+        +trail_delay_secs: int = 300
+        +trail_be_offset: double = 1.0
+        +breakout_buffer: double = 0.0
+        +max_daily_trades: int = 3
+        +last_entry_hour: int = 13
+        +eod_flatten_hour: int = 15
+        +eod_flatten_min: int = 55
+        +news_blackout_min: int = 5
+        +qty: int = 1
+        +session_open_hour: int = 9
+        +session_open_min: int = 30
+        +trailing_drawdown_cap: double = 2500.0
+        +consistency_cap_pct: double = 0.30
+        +daily_loss_limit: double = -1000.0
+        +symbol: string
+        +trade_contract: string
+        +exchange: string
+        +point_value: double = 2.0
+        +dry_run: bool = true
+        +from_file(path) OrbConfig$
+        +pg_connstr() string
+    }
+
+    class OrbStrategy {
+        -cfg_: OrbConfig
+        -session_: OrbSession
+        -current_bar_: MinuteBar
+        -signal_cb_: SignalCallback
+        -last_price_: double
+        -last_et_hour_: int
+        -last_et_min_: int
+        -eod_emitted_: bool
+
+        +set_signal_callback(cb)
+        +reset_session()
+        +on_tick(tick: OrbTick)
+        +check_eod(hour, min)
+        +halt_trading(reason)
+        +notify_trade_filled(dir: OrbSignal)
+        +seed_orb_range(high, low)
+        +session() OrbSession
+        -is_in_orb_window(h, m) bool
+        -is_news_blackout(h, m) bool
+        -handle_completed_bar(bar, h, m)
+        -check_breakout(price, h, m)
+        -emit_eod_flatten()
+    }
+
+    class OrderManager {
+        -cfg_: OrbConfig
+        -risk_: RiskManager
+        -lat_: LatencyLogger
+        -pos_: Position
+        -state_mu_: mutex
+        -pending_modify_: bool
+        -entry_halted_: bool
+        -rejected_exit_count_: int
+
+        +set_order_callback(cb)
+        +set_cancel_callback(cb)
+        +set_modify_callback(cb)
+        +on_signal(sig, price, reason)
+        +on_fill_notification(basket, fill_px, qty, is_entry)
+        +check_trail_and_stop(current_price)
+        +flatten_now(reason, price)
+        +on_order_rejected(basket, msg)
+        +on_cancel_confirmed(basket)
+        +set_stop_server_basket(id)
+        +on_modify_response(ok, code)
+        +position_snapshot() Position
+        +is_flat() bool
+        +pop_trade_completed(out) bool
+        -new_basket_id() string
+        -compute_sl(fill_price, dir) double
+        -submit_stop_order_locked(sl)
+        -update_stop_order_locked(old, new, price)
+        -cancel_stop_locked()
+        -initiate_exit_locked(reason, price)
+    }
+
+    class RiskManager {
+        -cfg_: OrbConfig
+        -equity_: double
+        -peak_equity_: double
+        -total_profit_: double
+        -daily_pnl_: double
+        -halted_: atomic~bool~
+        -halt_reason_: string
+
+        +seed_total_profit(pnl)
+        +reset_daily()
+        +on_trade_pnl(pnl_usd)
+        +can_trade(reason) bool
+        +set_equity(eq)
+        +equity() double
+        +peak_equity() double
+        +daily_pnl() double
+        +total_profit() double
+        +halted() bool
+        +snapshot() Snapshot
+        -halt(reason)
+    }
+
+    class Position {
+        +state: PosState
+        +direction: OrbSignal
+        +entry_price: double
+        +exit_price: double
+        +sl_price: double
+        +fill_price_actual: double
+        +mfe: double
+        +mae: double
+        +qty: int
+        +trailing_active: bool
+        +exit_reason: string
+        +pnl_points: double
+        +pnl_usd: double
+    }
+
+    class OrbSession {
+        +orb_high: double
+        +orb_low: double
+        +orb_set: bool
+        +trades_today: int
+        +in_position: bool
+        +risk_halted: bool
+        +halt_reason: string
+        +reset()
+    }
+
+    class MinuteBar {
+        +minute_utc: int
+        +open: double
+        +high: double
+        +low: double
+        +close: double
+        +volume: int64
+        +complete: bool
+        +update(price, sz)
+    }
+
+    OrbStrategy --> OrbSession : maintains
+    OrbStrategy --> MinuteBar : current_bar_
+    OrbStrategy ..> OrderManager : SignalCallback →
+    OrderManager --> RiskManager : can_trade()
+    OrderManager --> Position : pos_
+    OrbConfig --> OrbStrategy : cfg_
+    OrbConfig --> OrderManager : cfg_
+    OrbConfig --> RiskManager : cfg_
+    </div>
+  </div>
+</section>
+
+<!-- ─── COLLECTOR ────────────────────────────────────────────────────── -->
+<section id="collector">
+  <h2>Collector Pipeline <span class="tag tag-cpp">src/</span></h2>
+  <div class="card">
+    <div class="mermaid">
+classDiagram
+    class Collector {
+        -cfg_: Config
+        -db_: TickDB
+        -audit_: AuditLog
+        -wal_: Wal
+        -sentinel_: DataSentinel
+        -client_: RithmicClient
+        -session_id_: int64
+        -buf_: vector~TickRow~
+        -bbo_buf_: vector~BBORow~
+        -depth_buf_: vector~DepthRow~
+        -session_total_: atomic~int64~
+        -running_: atomic~bool~
+
+        +run()
+        +stop()
+        -on_tick(TickRow)
+        -on_bbo(BBORow)
+        -on_depth(DepthRow)
+        -flush() → FLUSH_EVERY_N=5 / 100ms
+        -flush_bbo()
+        -flush_depth()
+        -flush_sentinel()
+        -flush_metrics() → 60s
+        -status_log()
+        -ensure_db_connected()
+    }
+
+    class RithmicClient {
+        -ioc_: io_context
+        -ssl_ctx_: ssl_context
+        -cfg_: Config
+        -on_tick_: TickCallback
+        -on_bbo_: BBOCallback
+        -on_depth_: DepthCallback
+        -heartbeat_interval_: double=30
+        -running_: atomic~bool~
+
+        +set_on_tick(cb)
+        +set_on_bbo(cb)
+        +set_on_depth(cb)
+        +run() awaitable
+        +run_connection_test(db, n=5) awaitable
+        +stop()
+        -connect_ws() awaitable
+        -get_system_info(ws) awaitable
+        -login(ws) awaitable
+        -subscribe(ws, symbol, exchange) awaitable
+        -subscribe_depth(ws, symbol, exchange) awaitable
+        -send_heartbeat(ws) awaitable
+        -receive_loop(ws) awaitable
+        -dispatch_message(payload)
+        -frame~Msg~(msg) string$
+        -strip_header(wire) string$
+    }
+
+    class TickDB {
+        -conn_: PGconn*
+        -connstr_: string
+        -read_only_: bool
+
+        +write(rows) int
+        +write_bbo(rows) int
+        +write_depth(rows) int
+        +reconnect()
+        +is_connected() bool
+        +start_session(mode, params_json) int64
+        +end_session(sid, ticks, bbo, depth, rejected, gaps, alerts, json)
+        +write_metric(QualityMetric)
+        +write_metrics(vector)
+        +write_sentinel_alerts(alerts)
+        +write_gate_result(GateResult)
+        +row_count() int64
+        +latest_price() optional~double~
+        +summary() DBSummary
+        -ensure_schema()
+        -exec(sql)
+        -format_ts(ts_micros) string$
+    }
+
+    class DataSentinel {
+        -cfg_: Config
+        -last_price_: double
+        -last_ts_us_: int64
+        -tick_count_: int64
+        -recent_sizes_: deque~int64~ [30 ticks]
+        -alerts_: vector~SentinelAlert~
+
+        +observe_tick(price, size, ts_micros)
+        +observe_bbo(bid, ask)
+        +drain_alerts() vector~Alert~
+        +tick_count() int64
+        +alert_count() int64
+        +gap_count() int64
+        -emit(check, severity, message, value)
+    }
+
+    class Wal {
+        -path_: string
+        +write_batch(rows)
+        +commit()
+        +replay() vector~TickRow~
+        +dirty() bool
+        +exists() bool
+        +path() string
+    }
+
+    class AuditLog {
+        -conn_: PGconn*
+        -buf_: vector~Event~
+        -MAX_BUF: 10000
+
+        +log(event, details, severity)
+        +info(event, details)
+        +warn(event, details)
+        +error(event, details)
+        +flush()
+        +pending() int
+    }
+
+    class TickValidator {
+        +MAX_DRIFT_US: 172800000000
+        +MAX_PRICE: 1000000.0
+        +MAX_SIZE: 50000
+        +valid(TickRow, reason*) bool$
+    }
+
+    Collector --> RithmicClient : client_
+    Collector --> TickDB : db_
+    Collector --> AuditLog : audit_
+    Collector --> Wal : wal_
+    Collector --> DataSentinel : sentinel_
+    Collector ..> TickValidator : on_tick()
+    </div>
+  </div>
+</section>
+
+<!-- ─── CONFIG SCHEMA ────────────────────────────────────────────────── -->
+<section id="config">
+  <h2>Config Schema <span class="tag tag-py">Pydantic</span></h2>
+  <div class="card">
+    <div class="mermaid">
+graph TB
+    LC["LiveConfig\nlive_config.json"]
+
+    LC --> IDENT["Identity\ndry_run: bool\nsymbol: str\ntrade_contract: str\nexchange: str\npoint_value: float = 2.0\naccount_id: str\ntrade_route: str\nfcm_id: str\nib_id: str"]
+
+    LC --> FLAT["C++ Flat Params\norb_minutes: int\nsl_points: float\ntrail_be_trigger: float\ntrail_step: float\ntrail_delay_secs: int\ntrail_be_offset: float\nmax_daily_trades: int\nlast_entry_hour: int\neod_flatten_hour: int\neod_flatten_min: int\nsession_open_hour: int\nsession_open_min: int\nqty: int\ndaily_loss_limit: float\ntrailing_drawdown_cap: float\nconsistency_cap_pct: float\ncommission_rt: float"]
+
+    LC --> ORB["orb:\norb_period_minutes: int\nstop_loss_ticks: int\ntarget_ticks: int\ntick_size: float = 0.25\npoint_value: float = 2.0\nrth_open: str '09:30:00'\nrth_close: str '16:00:00'\neod_exit_minutes_before_close: int\nallow_short: bool"]
+
+    LC --> ML["ml:\nenabled: bool\nmodel_path: str\nscaler_path: str\nfeature_cache_path: str\nfeature_lookback_days: int\nmin_confidence: float\nfallback_to_fixed_params: bool"]
+
+    LC --> PROP["prop_firm:\nname: str\ndaily_loss_limit: float\nmax_position_size: int\nmax_daily_trades: int\ntrailing_drawdown_limit: float\nconsistency_rule_pct: float"]
+
+    LC --> DB["db:\nhost_env: str\nport_env: str\ndbname_env: str\nuser_env: str\npassword_env: str\nconnect_timeout: int\nstatement_timeout_ms: int"]
+
+    LC --> RITH["rithmic:\nsystem_env: str\nuser_env: str\npassword_env: str\napp_name_env: str\napp_version_env: str\nssl_cert_path: str\nreconnect_max_attempts: int\nreconnect_base_delay_s: float\ntick_timeout_s: float"]
+
+    LC --> ALERTS["alerts:\nenabled: bool\nemail_to: str\nslack_webhook_env: str\non_trade_fill: bool\non_daily_loss_limit: bool\non_connection_loss: bool\non_emergency_flatten: bool"]
+
+    LC --> LOGGING["logging:\nlog_dir: str\nlog_level: Literal\nlog_trades_to_db: bool\nlog_ticks: bool"]
+
+    style LC fill:#1f6feb44,stroke:#58a6ff
+    style IDENT fill:#21262d,stroke:#30363d
+    style FLAT fill:#21262d,stroke:#30363d
+    style ORB fill:#0d2818,stroke:#3fb950
+    style ML fill:#1f1a2e,stroke:#bc8cff
+    style PROP fill:#2e1a1a,stroke:#f85149
+    style DB fill:#1a1f2e,stroke:#58a6ff
+    style RITH fill:#1a1f2e,stroke:#58a6ff
+    style ALERTS fill:#2e2a1a,stroke:#d29922
+    style LOGGING fill:#21262d,stroke:#30363d
+    </div>
+  </div>
+</section>
+
+<!-- ─── DATABASE SCHEMA ──────────────────────────────────────────────── -->
+<section id="database">
+  <h2>Database Schema <span class="tag tag-db">PostgreSQL / TimescaleDB</span></h2>
+  <div class="card">
+    <div class="mermaid">
+erDiagram
+    ticks {
+        timestamptz ts_event PK
+        float8 price
+        int8 size
+        bool is_buy
+        text symbol
+        text exchange
+        text source
+    }
+
+    live_position {
+        date session_date PK
+        text instrument PK
+        text strategy PK
+        text state
+        text direction
+        float8 entry_price
+        float8 current_price
+        float8 legends_price
+        float8 unrealized_pnl_pts
+        float8 unrealized_pnl_usd
+        float8 sl_price
+        float8 orb_high
+        float8 orb_low
+        bool orb_set
+        int4 trades_today
+        bool md_connected
+        bool op_connected
+        timestamptz last_updated
+    }
+
+    live_trades {
+        bigserial id PK
+        date trade_date
+        text instrument
+        text strategy
+        text direction
+        float8 entry_price
+        float8 exit_price
+        float8 sl_price
+        int4 qty
+        float8 pnl_points
+        float8 pnl_usd
+        text exit_reason
+        timestamptz entry_time
+        timestamptz exit_time
+        int8 signal_to_submit_us
+        int8 submit_to_fill_ms
+        int4 entry_slippage_ticks
+        int4 exit_slippage_ticks
+        float8 mae_pts
+        float8 mfe_pts
+    }
+
+    live_sessions {
+        date session_date PK
+        text instrument PK
+        text strategy PK
+        int4 trades_taken
+        float8 daily_pnl_usd
+        float8 orb_range
+        float8 account_equity
+        float8 peak_equity
+        bool risk_halted
+        text halt_reason
+    }
+
+    loss_limits {
+        bigserial id PK
+        bool active
+        float8 weekly_loss_limit
+        timestamptz updated_at
+    }
+
+    audit_log {
+        bigserial id PK
+        text ts
+        text event
+        text severity
+        text details
+        int8 session_id FK
+    }
+
+    quality_metrics {
+        bigserial id PK
+        text metric
+        float8 value
+        text labels_json
+        int8 session_id FK
+    }
+
+    live_sessions ||--o{ live_trades : "session_date + strategy"
+    live_sessions ||--o{ live_position : "session_date + strategy"
+    </div>
+  </div>
+</section>
+
+<!-- ─── PREFLIGHT GATES ──────────────────────────────────────────────── -->
+<section id="preflight">
+  <h2>go_live.py — Preflight Gates</h2>
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+    START([go_live.py main])
+    START --> A
+
+    A{"Gate A\nNO_DEPLOY\nfile absent?"}
+    A -->|FAIL| HALT([❌ Abort])
+    A -->|PASS| B
+
+    B{"Gate B\nPydantic schema\nvalid?"}
+    B -->|FAIL| HALT
+    B -->|PASS| C
+
+    C{"Gate C\ndry_run = false?"}
+    C -->|FAIL| HALT
+    C -->|PASS| D
+
+    D{"Gate D\nPostgreSQL\nreachable?"}
+    D -->|FAIL| HALT
+    D -->|PASS| E
+
+    E{"Gate E\nSSL cert\nexists?"}
+    E -->|FAIL| HALT
+    E -->|PASS| F
+
+    F{"Gate F\nML model\nchecksums match?"}
+    F -->|FAIL| HALT
+    F -->|PASS| G
+
+    G{"Gate G\nDisk ≥ 5 GiB\nfree?"}
+    G -->|FAIL| HALT
+    G -->|PASS| H
+
+    H{"Gate H\nDRIFT_HALT\nabsent?"}
+    H -->|FAIL| HALT
+    H -->|PASS| I
+
+    I{"Gate I\nProp firm\nlimits sane?"}
+    I -->|FAIL| HALT
+    I -->|PASS| J
+
+    J{"Gate J\nequity >\ntrailing_dd_cap?"}
+    J -->|FAIL| HALT
+    J -->|PASS| K
+
+    K{"Gate K\ntrade_route ≠\nsimulator?"}
+    K -->|FAIL| HALT
+    K -->|PASS| LAUNCH
+
+    LAUNCH([✅ Launch live_trader.py])
+
+    style HALT fill:#2e1a1a,stroke:#f85149,color:#f85149
+    style LAUNCH fill:#0d2818,stroke:#3fb950,color:#3fb950
+    style START fill:#1f1a2e,stroke:#bc8cff
+    </div>
+  </div>
+</section>
+
+<!-- ─── FEATURES ─────────────────────────────────────────────────────── -->
+<section id="features">
+  <h2>ML Feature Pipeline <span class="tag tag-py">strategy/features.py</span></h2>
+  <div class="card">
+    <div class="mermaid">
+graph LR
+    BARS["list[dict]\nbars input"] --> CF
+
+    subgraph CF ["compute_features(bars) → 74 features"]
+        direction TB
+        ORBf["ORB metrics\norb_high, orb_low\norb_range\norb_range_pct\norb_mid"]
+        TIME["Time features\nminutes_since_open\nminutes_to_close\ntime_pct\nsession_hour\nsession_min"]
+        PRICE["Price action\nopen/high/low/close\ngap_pct\nhigh_low_range\nbody_pct\nupper/lower_wick"]
+        IND["Indicators\nATR-14\nRSI-14\nSMA-5/10/20\nEMA-9/21\nBB upper/mid/lower\nBB %B, width"]
+        VOL["Volume\nvol_ma5\nvol_ratio\nbar_volume"]
+        REL["ORB-relative\npct_above_orb_high\npct_below_orb_low\ndist_to_orb_high/low\nbreakout_strength"]
+        OF["✅ Order Flow  (now live)\nbid_ask_imbalance\nimbalance_ratio\ntrade_aggression\ndelta_divergence\nvolume_delta\ncum_delta"]
+    end
+
+    CF --> OUT["dict[str, float]\n74 keys → XGBoost"]
+
+    style CF fill:#1f1a2e,stroke:#bc8cff33
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer style="text-align:center;padding:32px;color:var(--text2);font-size:11px;border-top:1px solid var(--border);margin-top:32px;">
+  Rithmic Engine — MNQ ORB Strategy &nbsp;·&nbsp; Oracle VM 170.9.233.177 &nbsp;·&nbsp; v2 · Updated 2026-05-02
+  &nbsp;·&nbsp; <span style="color:var(--green);">systemd enabled</span>
+  &nbsp;·&nbsp; <span style="color:var(--green);">order-flow features live</span>
+  &nbsp;·&nbsp; <span style="color:var(--green);">Slack alerts wired</span>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      background: '#161b22',
+      primaryColor: '#1f6feb',
+      primaryTextColor: '#e6edf3',
+      primaryBorderColor: '#30363d',
+      lineColor: '#8b949e',
+      secondaryColor: '#21262d',
+      tertiaryColor: '#0d1117',
+      edgeLabelBackground: '#161b22',
+      clusterBkg: '#161b22',
+      clusterBorder: '#30363d',
+      titleColor: '#e6edf3',
+      nodeBorder: '#30363d',
+      mainBkg: '#21262d',
+      nodeTextColor: '#e6edf3',
+      fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+      fontSize: '12px',
+      stateBkg: '#21262d',
+      stateBorder: '#30363d',
+      labelBackground: '#161b22',
+      attributeBackgroundColorEven: '#161b22',
+      attributeBackgroundColorOdd: '#21262d',
+    },
+    flowchart: { curve: 'basis', padding: 20 },
+    sequence: { actorMargin: 60, messageAlign: 'center' },
+    er: { layoutDirection: 'TB', minEntityWidth: 100, minEntityHeight: 75, entityPadding: 15 },
+  });
+</script>
+</body>
+</html>

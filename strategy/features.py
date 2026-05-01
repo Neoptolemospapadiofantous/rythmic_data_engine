@@ -174,13 +174,18 @@ def _zero_safe(d: dict[str, Any]) -> dict[str, float]:
 
 # ── main public function ──────────────────────────────────────────────────────
 
-def compute_features(bars: list[dict]) -> dict[str, float]:
+def compute_features(bars: list[dict], orb_period: int = ORB_PERIOD) -> dict[str, float]:
     """Compute 74 features from a list of 1-minute OHLCV bars.
 
     Args:
         bars: non-empty list of bar dicts. Each bar must contain:
               timestamp (datetime or epoch float), open, high, low, close, volume.
               Optional: bid_volume, ask_volume (default 0).
+        orb_period: number of 1-minute bars that define the opening range.
+                    Must match orb_period_minutes from live_config.json.
+                    Defaults to the module constant ORB_PERIOD (5) for
+                    back-compat, but live callers should always pass the
+                    configured value explicitly.
 
     Returns:
         Dict of exactly 74 feature name → float value.
@@ -210,7 +215,7 @@ def compute_features(bars: list[dict]) -> dict[str, float]:
     cur_ask_vol = ask_vols[-1]
 
     # ── ORB core ──────────────────────────────────────────────────────────────
-    orb_count = min(ORB_PERIOD, n)
+    orb_count = min(orb_period, n)
     orb_bars = bars[:orb_count]
     orb_high = max(_f(b, "high") for b in orb_bars)
     orb_low = min(_f(b, "low") for b in orb_bars)
@@ -266,12 +271,14 @@ def compute_features(bars: list[dict]) -> dict[str, float]:
         session_half = 1.0
 
     opening_range_vol = sum(_f(b, "volume") for b in orb_bars)
-    # Approximate previous-session values from the first bar of the current session
-    prev_day_close = opens_[0]  # no cross-session data available
-    prev_day_high = orb_high
-    prev_day_low = orb_low
-    pre_market_gap = opens_[0] - prev_day_close  # ≈ 0 without true prev-close
-    overnight_gap = opens_[0] - prev_day_close
+    # prev_day_* features require cross-session data not available in the bars window.
+    # They are intentionally zeroed so the ML model sees a stable sentinel (0.0) rather
+    # than opens_[0] - opens_[0] = 0 masquerading as a real value.
+    prev_day_close = 0.0
+    prev_day_high = 0.0
+    prev_day_low = 0.0
+    pre_market_gap = 0.0
+    overnight_gap = 0.0
 
     # ── Moving averages ───────────────────────────────────────────────────────
     ema_3 = _ema(closes, 3)
@@ -293,20 +300,21 @@ def compute_features(bars: list[dict]) -> dict[str, float]:
     rsi_14 = _rsi(closes, 14)
     rsi_21 = _rsi(closes, 21)
 
-    # MACD(12, 26, 9): compute per-bar MACD line history then EMA(9) for signal
-    ema_12 = _ema(closes, 12)
-    ema_26 = _ema(closes, 26)
-    macd_line = ema_12 - ema_26
-    if n >= 26:
-        macd_hist_vals: list[float] = []
-        for i in range(len(closes)):
-            e12 = _ema(closes[: i + 1], 12)
-            e26 = _ema(closes[: i + 1], 26)
-            macd_hist_vals.append(e12 - e26)
-        macd_signal = _ema(macd_hist_vals, 9)
-    else:
-        macd_signal = macd_line
+    # MACD(12, 26, 9): single O(N) pass — carry EMA state forward bar by bar.
+    # The old loop called _ema(closes[:i+1]) inside a for-i loop, making it O(N²).
+    _k12, _k26 = 2.0 / 13.0, 2.0 / 27.0
+    _e12 = _e26 = closes[0]
+    macd_hist_vals: list[float] = []
+    for _c in closes:
+        _e12 = _c * _k12 + _e12 * (1.0 - _k12)
+        _e26 = _c * _k26 + _e26 * (1.0 - _k26)
+        macd_hist_vals.append(_e12 - _e26)
+    macd_line = macd_hist_vals[-1]
+    macd_signal = _ema(macd_hist_vals, 9)
     macd_histogram = macd_line - macd_signal
+    # Keep ema_12 / ema_26 consistent with the incremental values above
+    ema_12 = _e12
+    ema_26 = _e26
 
     # Stochastic(14, 3)
     stoch_k = _stoch_k(bars, 14)

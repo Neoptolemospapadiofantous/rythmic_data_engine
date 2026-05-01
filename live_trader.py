@@ -104,6 +104,30 @@ def _sd_notify(msg: str) -> None:
         pass
 
 
+# ── alerts ───────────────────────────────────────────────────────────────────
+
+def _send_alert(config: dict, message: str) -> None:
+    """Fire a Slack webhook if alerts are enabled and SLACK_WEBHOOK_URL is set.
+
+    Failures are always non-fatal — never let an alert failure break the trader.
+    Set alerts.enabled=true and SLACK_WEBHOOK_URL env var to activate.
+    """
+    alert_cfg = config.get("alerts", {})
+    if not alert_cfg.get("enabled", False):
+        return
+    webhook_env = alert_cfg.get("slack_webhook_env", "SLACK_WEBHOOK_URL")
+    url = os.environ.get(webhook_env, "")
+    if not url:
+        return
+    try:
+        import urllib.request
+        payload = json.dumps({"text": message}).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req, timeout=8)
+    except Exception:
+        pass
+
+
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
 def _pg_connect(config: dict):
@@ -134,6 +158,8 @@ def _pg_connect_with_retry(config: dict, log: logging.Logger):
             log.warning("PG connect attempt %d/%d failed: %s — retrying in %.0fs",
                         attempt + 1, max_retries, exc, wait)
             time.sleep(wait)
+    if config.get("alerts", {}).get("on_connection_loss", True):
+        _send_alert(config, ":red_circle: *live_trader* DB connection lost after max retries — trader halting")
     raise RuntimeError("PostgreSQL unavailable after %d attempts" % max_retries)
 
 
@@ -173,6 +199,7 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
             """, (today,))
             cpp_row = cur.fetchone()
         except Exception:
+            conn.rollback()  # reset aborted transaction so subsequent queries work
             cpp_row = None  # live_trades table may not exist in all environments
 
     if cpp_row is not None:
@@ -261,7 +288,7 @@ def _update_trade_order_id(conn, trade_id: int, order_id: str) -> None:
             cur.execute("UPDATE trades SET order_id = %s WHERE id = %s", (order_id, trade_id))
         conn.commit()
     except Exception:
-        pass  # order_id column optional
+        conn.rollback()  # reset aborted transaction; order_id column is optional
 
 
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,
@@ -303,17 +330,42 @@ def _write_session_summary(conn, session_date: datetime.date, dry_run: bool,
 
 # ── poll helpers ──────────────────────────────────────────────────────────────
 
+_BARS_SELECT = """\
+    SELECT time_bucket('1 minute', ts_event) AS ts,
+           first(price, ts_event)                           AS open,
+           max(price)                                       AS high,
+           min(price)                                       AS low,
+           last(price, ts_event)                            AS close,
+           sum(size)                                        AS volume,
+           COALESCE(sum(size) FILTER (WHERE is_buy = true),  0) AS ask_volume,
+           COALESCE(sum(size) FILTER (WHERE is_buy = false), 0) AS bid_volume
+"""
+
+
+def _poll_bars_since(conn, symbol: str, since_ts: datetime.datetime) -> list[dict]:
+    """Return all completed 1-min bars from since_ts onwards, in chronological order.
+
+    ask_volume = buy-initiated volume (aggressor hit the ask).
+    bid_volume = sell-initiated volume (aggressor hit the bid).
+    Both are used by features.py for order-flow imbalance signals.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            _BARS_SELECT + """
+            FROM   ticks
+            WHERE  symbol = %s AND ts_event >= %s
+            GROUP  BY ts
+            ORDER  BY ts ASC
+        """, (symbol, since_ts))
+        return [dict(row) for row in cur.fetchall()]
+
+
 def _poll_latest_bar(conn, symbol: str, since_ts: Optional[datetime.datetime]) -> Optional[dict]:
     """Return the most recent completed 1-min bar, or None if none newer than since_ts."""
     with conn.cursor() as cur:
         if since_ts:
-            cur.execute("""
-                SELECT time_bucket('1 minute', ts_event) AS ts,
-                       first(price, ts_event) AS open,
-                       max(price)             AS high,
-                       min(price)             AS low,
-                       last(price, ts_event)  AS close,
-                       sum(size)              AS volume
+            cur.execute(
+                _BARS_SELECT + """
                 FROM   ticks
                 WHERE  symbol = %s AND ts_event >= %s
                   AND  time_bucket('1 minute', ts_event) > time_bucket('1 minute', %s)
@@ -322,13 +374,8 @@ def _poll_latest_bar(conn, symbol: str, since_ts: Optional[datetime.datetime]) -
                 LIMIT  1
             """, (symbol, since_ts, since_ts))
         else:
-            cur.execute("""
-                SELECT time_bucket('1 minute', ts_event) AS ts,
-                       first(price, ts_event) AS open,
-                       max(price)             AS high,
-                       min(price)             AS low,
-                       last(price, ts_event)  AS close,
-                       sum(size)              AS volume
+            cur.execute(
+                _BARS_SELECT + """
                 FROM   ticks
                 WHERE  symbol = %s
                 GROUP  BY ts
@@ -385,6 +432,7 @@ class LiveTrader:
         self._last_tick_ts: Optional[datetime.datetime] = None
         self._last_watchdog = time.monotonic()
         self._eod_flatten_done = False
+        self._orb_bars: list[dict] = []
 
         # Register signal handlers for clean shutdown
         signal.signal(signal.SIGTERM, self._handle_shutdown)
@@ -394,6 +442,10 @@ class LiveTrader:
 
     def _handle_shutdown(self, signum: int, frame) -> None:
         self._log.warning("shutdown signal %d received — emergency flatten", signum)
+        had_position = self._strategy.state.name == "IN_POSITION"
+        if had_position and self._config.get("alerts", {}).get("on_emergency_flatten", True):
+            _send_alert(self._config,
+                        f":rotating_light: *live_trader* SIGTERM on {self._symbol} — emergency flatten triggered")
         self._emergency_flatten("SIGNAL_%d" % signum)
         sys.exit(0)
 
@@ -443,6 +495,7 @@ class LiveTrader:
 
         self._write_state("CONNECTED")
         _sd_notify("READY=1")
+        self._replay_historical_bars()
         self._log.info("startup complete — entering trading loop")
         self._loop()
 
@@ -460,7 +513,35 @@ class LiveTrader:
             else:
                 self._bar_loop()
 
+            self._write_state()
             time.sleep(PG_POLL_INTERVAL)
+
+    def _replay_historical_bars(self) -> None:
+        """Replay completed bars from today's RTH open to synchronise the strategy state machine.
+
+        Intentionally does NOT call _on_signal — historical bars should never trigger live
+        order submission.  If an open position exists, _reconcile_position already restored it
+        before this runs.  If a trade was taken and closed earlier today, replaying the
+        breakout bar would create a phantom open trade; we suppress that by ignoring signals
+        from replay entirely.
+        """
+        rth_open_str = self._config.get("orb", {}).get("rth_open", "09:30:00")
+        today = datetime.datetime.now(tz=ET).date()
+        rth_open_et = datetime.datetime.combine(
+            today, datetime.time.fromisoformat(rth_open_str), tzinfo=ET)
+        bars = _poll_bars_since(self._conn, self._symbol, rth_open_et)
+        if not bars:
+            return
+        self._log.info("replaying %d historical bar(s) from %s ET", len(bars), rth_open_str)
+        for bar in bars:
+            self._orb_bars.append(dict(bar))
+            if len(self._orb_bars) > 120:
+                self._orb_bars = self._orb_bars[-120:]
+            self._strategy.on_bar(dict(bar))  # state-machine update only; signal suppressed
+            self._last_bar_ts = bar["ts"]
+        self._write_state("CONNECTED")
+        self._log.info("replay complete: strategy_state=%s orb_high=%s orb_low=%s",
+                       self._strategy.state.name, self._strategy.orb_high, self._strategy.orb_low)
 
     def _bar_loop(self) -> None:
         try:
@@ -476,6 +557,9 @@ class LiveTrader:
             return
 
         self._last_bar_ts = bar["ts"]
+        self._orb_bars.append(dict(bar))
+        if len(self._orb_bars) > 120:
+            self._orb_bars = self._orb_bars[-120:]
         signal = self._strategy.on_bar(dict(bar))
         if signal is not None:
             self._on_signal(signal)
@@ -519,6 +603,10 @@ class LiveTrader:
         self._log.info("trade_open id=%s direction=%s entry=%s sl=%s target=%s dry_run=%s",
                        self._active_trade_id, signal.direction, signal.entry_price,
                        signal.stop_loss, signal.target, self._dry_run)
+        if not self._dry_run and self._config.get("alerts", {}).get("on_trade_fill", True):
+            _send_alert(self._config,
+                        f":zap: *{self._symbol}* ENTRY {signal.direction} @ {signal.entry_price} "
+                        f"| SL {signal.stop_loss} | Target {signal.target}")
         self._write_state()
 
     def _on_exit(self, exit_price: float, exit_ts, exit_reason: str) -> None:
@@ -532,6 +620,11 @@ class LiveTrader:
             self._log.info("trade_close id=%s exit=%s reason=%s pnl=%.2f daily_pnl=%.2f",
                            self._active_trade_id, exit_price, exit_reason,
                            realized_pnl, self._daily_pnl)
+            if not self._dry_run and self._config.get("alerts", {}).get("on_trade_fill", True):
+                pnl_sign = "+" if realized_pnl >= 0 else ""
+                _send_alert(self._config,
+                            f":white_check_mark: *{self._symbol}* EXIT {exit_reason} @ {exit_price} "
+                            f"| PnL {pnl_sign}{realized_pnl:.2f} | Day {pnl_sign}{self._daily_pnl:.2f}")
             self._active_trade_id = None
         self._write_state()
 
@@ -566,13 +659,15 @@ class LiveTrader:
         """
         try:
             pos = self._strategy.current_position()
+            # Only fetch current price when in position (needed for unrealized PnL).
+            # When flat this round-trip is wasted — latest is never used below.
+            latest = _poll_latest_tick(self._conn, self._symbol, None) if (pos is not None and self._conn) else None
             if pos is not None:
                 position_str = pos.direction
                 entry_price = pos.entry_price
                 sl = pos.stop_loss
                 unrealized = 0.0
-                latest = _poll_latest_tick(self._conn, self._symbol, None) if self._conn else None
-                if latest and pos:
+                if latest:
                     price = float(latest["price"])
                     if pos.direction == "LONG":
                         unrealized = (price - pos.entry_price) * self._point_value
@@ -584,6 +679,17 @@ class LiveTrader:
                 sl = None
                 unrealized = 0.0
 
+            orb_bars_out = [
+                {
+                    "ts": b["ts"].isoformat() if hasattr(b["ts"], "isoformat") else str(b["ts"]),
+                    "open": float(b["open"]),
+                    "high": float(b["high"]),
+                    "low": float(b["low"]),
+                    "close": float(b["close"]),
+                    "volume": int(b.get("volume", 0)),
+                }
+                for b in self._orb_bars[-60:]
+            ]
             state = {
                 "position": position_str,
                 "entry_price": entry_price,
@@ -594,18 +700,66 @@ class LiveTrader:
                 "reconnect_failures": self._reconnect_failures,
                 "last_tick_ts": self._last_tick_ts_str,
                 "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "orb_high": self._strategy.orb_high,
+                "orb_low": self._strategy.orb_low,
+                "strategy_state": self._strategy.state.name,
+                "orb_minutes": self._config.get("orb", {}).get("orb_period_minutes", 15),
+                "orb_bars": orb_bars_out,
             }
             self._state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(state))
             tmp.rename(self._state_path)
+
+            # Mirror strategy state to live_position so the Next.js dashboard sees it.
+            # current_price is intentionally omitted — C++ executor owns that field.
+            if self._conn:
+                orb_set = self._strategy.orb_high is not None
+                with self._conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO live_position
+                            (session_date, instrument, strategy, state, direction,
+                             entry_price, unrealized_pnl_usd,
+                             sl_price, orb_high, orb_low, orb_set, last_updated)
+                        VALUES
+                            (%(session_date)s, %(instrument)s, %(strategy)s, %(state)s,
+                             %(direction)s, %(entry_price)s, %(unrealized_pnl_usd)s,
+                             %(sl_price)s, %(orb_high)s, %(orb_low)s, %(orb_set)s, NOW())
+                        ON CONFLICT (session_date, instrument, strategy) DO UPDATE SET
+                            state               = EXCLUDED.state,
+                            direction           = EXCLUDED.direction,
+                            entry_price         = EXCLUDED.entry_price,
+                            unrealized_pnl_usd  = EXCLUDED.unrealized_pnl_usd,
+                            sl_price            = EXCLUDED.sl_price,
+                            orb_high            = EXCLUDED.orb_high,
+                            orb_low             = EXCLUDED.orb_low,
+                            orb_set             = EXCLUDED.orb_set,
+                            last_updated        = NOW()
+                    """, {
+                        "session_date": self._session_date,
+                        "instrument": self._symbol,
+                        "strategy": "ORB_PY",
+                        "state": position_str,
+                        "direction": pos.direction if pos else None,
+                        "entry_price": float(pos.entry_price) if pos else None,
+                        "unrealized_pnl_usd": round(unrealized, 2) if pos else None,
+                        "sl_price": float(pos.stop_loss) if pos else None,
+                        "orb_high": float(self._strategy.orb_high) if self._strategy.orb_high is not None else None,
+                        "orb_low": float(self._strategy.orb_low) if self._strategy.orb_low is not None else None,
+                        "orb_set": orb_set,
+                    })
+                self._conn.commit()
         except Exception as exc:
             self._log.debug("_write_state error (non-fatal): %s", exc)
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
 
 
 # ── feature computation (delegates to strategy.features for parity with backtest) ─
 
-def compute_live_features(bars: list) -> dict:
+def compute_live_features(bars: list, config: dict | None = None) -> dict:
     """Compute the 74-feature dict for the given bar history.
 
     Delegates to strategy.features.compute_features() so that live and backtest
@@ -614,15 +768,15 @@ def compute_live_features(bars: list) -> dict:
     Args:
         bars: list of bar dicts with keys: timestamp, open, high, low, close,
               volume, bid_volume (optional), ask_volume (optional).
+        config: live_config dict. Used to read orb_period_minutes so features
+                match the strategy's actual ORB range. Defaults to 5 bars when None.
 
     Returns:
         dict mapping each of the 74 feature names to its computed value.
-
-    Raises:
-        ImportError: if strategy.features is not yet installed (install T1 first).
     """
     from strategy.features import compute_features  # noqa: PLC0415 — lazy import
-    return compute_features(bars)
+    orb_period = int((config or {}).get("orb", {}).get("orb_period_minutes", 5))
+    return compute_features(bars, orb_period=orb_period)
 
 
 # ── position restoration helper (monkey-patched onto strategy) ────────────────
@@ -665,6 +819,19 @@ def _check_no_deploy(config: dict) -> None:
         sys.exit(1)
 
 
+def _check_audit_halt() -> None:
+    halt = Path("data/AUDIT_HALT")
+    if halt.exists():
+        try:
+            detail = json.loads(halt.read_text()).get("message", "(see data/AUDIT_HALT)")
+        except Exception:
+            detail = halt.read_text().strip()[:200] or "(see data/AUDIT_HALT)"
+        print("ERROR: AUDIT_HALT sentinel present — audit daemon flagged a critical issue:", file=sys.stderr)
+        print(f"  {detail}", file=sys.stderr)
+        print("Resolve the issue, then: rm data/AUDIT_HALT", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="NQ ORB live trader")
     parser.add_argument("--config", default="config/live_config.json",
@@ -679,6 +846,7 @@ def main() -> None:
     log = logging.getLogger("live_trader")
 
     _check_no_deploy(config)
+    _check_audit_halt()
 
     dry_run = args.dry_run or bool(config.get("dry_run", True))
     if dry_run:
