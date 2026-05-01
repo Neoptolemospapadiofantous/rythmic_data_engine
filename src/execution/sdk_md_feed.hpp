@@ -76,8 +76,10 @@ public:
     SdkMdCallbacks(boost::asio::any_io_executor ex,
                    OrbStrategy&         strategy,
                    OrderManager&        order_mgr,
-                   std::atomic<bool>&   login_ok)
-        : ex_(ex), strategy_(strategy), order_mgr_(order_mgr), login_ok_(login_ok) {}
+                   std::atomic<bool>&   login_ok,
+                   std::atomic<bool>&   auth_rejected)
+        : ex_(ex), strategy_(strategy), order_mgr_(order_mgr),
+          login_ok_(login_ok), auth_rejected_(auth_rejected) {}
 
     // ── Login / alert ─────────────────────────────────────────────────────────
     int Alert(RApi::AlertInfo* pInfo, void*, int* aiCode) override {
@@ -87,6 +89,7 @@ public:
             login_ok_.store(true, std::memory_order_release);
         } else if (pInfo->iAlertType == RApi::ALERT_LOGIN_FAILED) {
             LOG("[SDK_MD] MD login FAILED — code=%d", pInfo->iRpCode);
+            auth_rejected_.store(true, std::memory_order_release);
         } else if (pInfo->iAlertType == RApi::ALERT_CONNECTION_BROKEN) {
             LOG("[SDK_MD] Connection broken");
             login_ok_.store(false, std::memory_order_release);
@@ -217,6 +220,7 @@ private:
     OrbStrategy&          strategy_;
     OrderManager&         order_mgr_;
     std::atomic<bool>&    login_ok_;
+    std::atomic<bool>&    auth_rejected_;
 };
 
 // ─── SdkMdFeed — RAII wrapper around REngine for the executor ─────────────────
@@ -228,9 +232,12 @@ public:
               OrbStrategy&         strategy,
               OrderManager&        order_mgr)
         : cfg_(cfg), conn_(conn), ex_(ex),
-          callbacks_(ex, strategy, order_mgr, login_ok_) {}
+          callbacks_(ex, strategy, order_mgr, login_ok_, auth_rejected_) {}
 
     ~SdkMdFeed() { stop(); }
+
+    // True if the last start() failure was an explicit server rejection (not a timeout/network error).
+    bool auth_rejected() const { return auth_rejected_.load(std::memory_order_acquire); }
 
     // Start the SDK engine and block until login completes (or 10s timeout).
     // Returns true on success.
@@ -333,6 +340,7 @@ private:
     const SdkConnParams conn_;
     boost::asio::any_io_executor ex_;
     std::atomic<bool>   login_ok_{false};
+    std::atomic<bool>   auth_rejected_{false};
     SdkAdmCallbacks     adm_callbacks_;
     SdkMdCallbacks      callbacks_;
     RApi::REngine*      engine_{nullptr};

@@ -89,13 +89,14 @@ struct OrbConfig {
     double      point_value = 2.0;    // $/point: MNQ=2.0, NQ=20.0 — read from config
     std::string environment = "legends"; // "legends" or "paper"
 
-    // ── Rithmic MD connection (AMP — TICKER_PLANT) ───────────────────
-    // MD feed uses AMP credentials. Legends allows only one concurrent
-    // session — using Legends for both plants causes FORCED LOGOUT on MD.
+    // ── Rithmic MD connection (TICKER_PLANT) ─────────────────────────
+    // Provider selected via RITHMIC_MD_PROVIDER env var.
+    // Resolved at startup from MD_{PROVIDER}_* env vars.
+    std::string md_provider     = "legends";
     std::string md_user;
     std::string md_password;
-    std::string md_system_name = "Rithmic 01";
-    std::string md_url         = "wss://ritpz01001.01.rithmic.com:443";
+    std::string md_system_name  = "LegendsTrading";
+    std::string md_url          = "wss://ritpz01001.01.rithmic.com:443";
 
     // ── Rithmic ORDER connection (Legends — ORDER_PLANT) ───────────
     std::string rithmic_user;
@@ -156,12 +157,20 @@ struct OrbConfig {
         if (c.pg_password.empty())
             c.pg_password = env("RITHMIC_PG_PASSWORD", "");
 
-        // AMP credentials for TICKER_PLANT (market data feed only)
-        // AMP and Legends each get their own session — no session conflict.
-        c.md_user        = env("RITHMIC_AMP_USER",     "");
-        c.md_password    = env("RITHMIC_AMP_PASSWORD",  "");
-        c.md_system_name = env("RITHMIC_AMP_SYSTEM",   "Rithmic 01");
-        c.md_url         = env("RITHMIC_AMP_URL",       c.md_url.c_str());
+        // MD provider — resolved from RITHMIC_MD_PROVIDER → MD_{PROVIDER}_* vars
+        {
+            c.md_provider = env("RITHMIC_MD_PROVIDER", "legends");
+            // Uppercase the provider name to build env var prefix
+            std::string pfx = "MD_";
+            for (char ch : c.md_provider) pfx += static_cast<char>(::toupper(ch));
+            pfx += "_";
+            c.md_user        = env((pfx + "USER").c_str(),     "");
+            c.md_password    = env((pfx + "PASSWORD").c_str(), "");
+            c.md_system_name = env((pfx + "SYSTEM").c_str(),   c.md_system_name.c_str());
+            c.md_url         = env((pfx + "URL").c_str(),       c.md_url.c_str());
+            fprintf(stderr, "[CONFIG] MD provider: %s (user=%s system=%s)\n",
+                c.md_provider.c_str(), c.md_user.c_str(), c.md_system_name.c_str());
+        }
 
         // Legends credentials for ORDER_PLANT (execution) — prop firm account
         // Username: JSON field takes effect; env var overrides (allows runtime swap without rebuild)
