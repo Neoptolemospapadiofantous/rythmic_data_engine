@@ -55,18 +55,16 @@ struct OrbSession {
     double orb_low  = std::numeric_limits<double>::max();
     bool   orb_set  = false;    // true when opening range is complete
     int    trades_today = 0;
-    bool   long_taken   = false; // only one direction per session (first break wins)
-    bool   short_taken  = false;
+    bool   in_position  = false; // true while a trade is open (signal → close)
     bool   risk_halted  = false;
     std::string halt_reason;
 
     void reset() {
-        orb_high   = std::numeric_limits<double>::lowest();
-        orb_low    = std::numeric_limits<double>::max();
-        orb_set    = false;
+        orb_high     = std::numeric_limits<double>::lowest();
+        orb_low      = std::numeric_limits<double>::max();
+        orb_set      = false;
         trades_today = 0;
-        long_taken   = false;
-        short_taken  = false;
+        in_position  = false;
         risk_halted  = false;
         halt_reason.clear();
     }
@@ -157,11 +155,12 @@ public:
     }
 
     // ── Notify strategy that a trade closed ──────────────────────────────────
-    // trades_today is already incremented at signal time in check_breakout;
-    // directional flags are also set there, but re-affirmed here for safety.
-    void notify_trade_filled(OrbSignal dir) {
-        if (dir == OrbSignal::BUY)  session_.long_taken  = true;
-        if (dir == OrbSignal::SELL) session_.short_taken = true;
+    // Called by executor when OrderManager pops a completed trade.
+    // Clears in_position so re-entry is allowed on next breakout tick.
+    void notify_trade_filled(OrbSignal /*dir*/) {
+        session_.in_position = false;
+        LOG("[ORB] Trade closed — flat, re-entry allowed (trades_today=%d/%d)",
+            session_.trades_today, cfg_.max_daily_trades);
     }
 
     void seed_orb_range(double high, double low) {
@@ -244,20 +243,22 @@ private:
     }
 
     void check_breakout(double price, int /*et_hour*/, int /*et_min*/) {
+        if (session_.in_position) return;  // must be flat before re-entering
+
         double buy_level  = session_.orb_high + cfg_.breakout_buffer;
         double sell_level = session_.orb_low  - cfg_.breakout_buffer;
 
-        if (!session_.long_taken && price > buy_level) {
+        if (price > buy_level) {
             LOG("[ORB] LONG breakout signal: price=%.2f orb_high=%.2f trades_today=%d",
                 price, session_.orb_high, session_.trades_today);
             if (signal_cb_) signal_cb_(OrbSignal::BUY, price, "orb_breakout_long");
-            session_.long_taken   = true;
-            session_.trades_today++;   // count at entry, not at close
-        } else if (!session_.short_taken && price < sell_level) {
+            session_.in_position  = true;
+            session_.trades_today++;
+        } else if (price < sell_level) {
             LOG("[ORB] SHORT breakout signal: price=%.2f orb_low=%.2f trades_today=%d",
                 price, session_.orb_low, session_.trades_today);
             if (signal_cb_) signal_cb_(OrbSignal::SELL, price, "orb_breakout_short");
-            session_.short_taken  = true;
+            session_.in_position  = true;
             session_.trades_today++;
         }
     }
