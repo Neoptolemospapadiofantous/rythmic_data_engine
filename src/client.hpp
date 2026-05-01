@@ -57,6 +57,12 @@ using TickCallback  = std::function<void(TickRow)>;
 using BBOCallback   = std::function<void(BBORow)>;
 using DepthCallback = std::function<void(DepthRow)>;
 
+// Thrown by login() on authentication rejection — not a transient error,
+// so the reconnect loop propagates it rather than retrying.
+struct LoginError : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
 // Rithmic WebSocket client (ticker plant only — data collection).
 //
 // Wire protocol: every WebSocket message carries a 4-byte big-endian signed

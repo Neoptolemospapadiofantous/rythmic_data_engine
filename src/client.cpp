@@ -154,7 +154,7 @@ asio::awaitable<void> RithmicClient::login(WsStream& ws) {
         resp.ParseFromString(payload);
 
         if (!resp.rp_code().empty() && resp.rp_code(0) != "0")
-            throw std::runtime_error("Login failed: " + resp.rp_code(0));
+            throw LoginError("Login failed: " + resp.rp_code(0));
 
         if (resp.heartbeat_interval() > 0)
             heartbeat_interval_ = resp.heartbeat_interval();
@@ -566,6 +566,8 @@ asio::awaitable<void> RithmicClient::run() {
 
             attempt = 0;
 
+        } catch (LoginError&) {
+            throw;   // authentication failure — do not retry
         } catch (std::exception& e) {
             // co_await is not allowed inside catch — record and act after
             if (!running_) break;
