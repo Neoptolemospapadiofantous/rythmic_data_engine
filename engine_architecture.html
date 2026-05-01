@@ -122,6 +122,8 @@
   <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">systemd ✓</span>
   <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">order-flow ✓</span>
   <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">alerts ✓</span>
+  <span style="background:#0d2818;border-color:#3fb950;color:#3fb950;">audit ✓</span>
+  <span style="background:#2e1a2e;border-color:#bc8cff;color:#bc8cff;">v3 · 2026-05-02</span>
   <span style="margin-left:auto;color:var(--text2);font-size:11px;">Oracle VM · 170.9.233.177</span>
 </header>
 
@@ -137,6 +139,8 @@
   <a href="#collector">Collector Pipeline</a>
   <a href="#config">Config Schema</a>
   <a href="#database">Database Schema</a>
+  <a href="#audit">Audit Daemon</a>
+  <a href="#escalation">Escalation Policy</a>
   <a href="#preflight">Preflight Gates</a>
 </nav>
 
@@ -176,6 +180,12 @@ graph TB
             LT["LiveTrader\n_loop()"]
             STRAT["MicroORBStrategy\non_bar() / on_tick()"]
             ML["ML Model\nXGBoost + scaler"]
+        end
+
+        subgraph AUDIT ["audit_daemon.py  (Python) · 24/7"]
+            AD["AuditDaemon\n10 checks / 2-5 min"]
+            ESCOV["EscalationEngine\nWARN→ERROR→CRITICAL"]
+            AH["data/AUDIT_HALT\nsentinel file"]
         end
 
         PG[("PostgreSQL\nTimescaleDB\nrithmic DB")]
@@ -224,14 +234,23 @@ graph TB
     FE -->|"POST /api/cpp/start\nPOST /api/cpp/kill"| BE
     BE -->|"SSH → sudo systemctl\nstart / stop / is-active"| SYSTEMD
 
+    PG -->|"ticks / sessions / live_trades"| AD
+    AD --> ESCOV
+    AD -->|"write quality_metrics\naudit_log"| PG
+    ESCOV -->|"_send_alert() escalation"| SLACK
+    ESCOV -->|"CRITICAL trading_constants"| AH
+    AH -.->|"_check_audit_halt()\nrefuses start"| LT
+
     style RITHMIC fill:#1a1f2e,stroke:#30363d
     style ORACLE fill:#161b22,stroke:#30363d
     style SYSTEMD fill:#2e2010,stroke:#d29922,stroke-width:2px
     style COLLECTOR fill:#0d2818,stroke:#3fb950,stroke-width:1px
     style EXECUTOR fill:#0d1b2e,stroke:#58a6ff,stroke-width:1px
     style PYTHON fill:#1f1a2e,stroke:#bc8cff,stroke-width:1px
+    style AUDIT fill:#1a1020,stroke:#bc8cff,stroke-width:2px
     style LOCAL fill:#1a1410,stroke:#d29922,stroke-width:1px
     style SLACK fill:#1a2e1a,stroke:#3fb950,stroke-width:1px
+    style AH fill:#2e1a1a,stroke:#f85149,stroke-width:2px
     </div>
   </div>
 </section>
@@ -364,36 +383,45 @@ flowchart TD
 
 <!-- ─── ALERTS ────────────────────────────────────────────────────────── -->
 <section id="alerts">
-  <h2>Alert System <span class="tag tag-py">live_trader.py · _send_alert()</span></h2>
+  <h2>Alert System <span class="tag tag-py">live_trader.py · audit_daemon.py</span></h2>
   <div class="card">
     <div class="mermaid">
 flowchart LR
-    subgraph CONFIG ["Activation"]
-        C1["alerts.enabled: true\nin live_config.json"]
-        C2["SLACK_WEBHOOK_URL\nin .env on Oracle"]
+    subgraph LT_SRC ["live_trader.py — trade events"]
+        E1["SIGTERM with open position\n_handle_shutdown()"]
+        E2["DB conn exhausted\n_pg_connect_with_retry()"]
+        E3["Trade ENTRY\n_on_signal() — live only"]
+        E4["Trade EXIT + PnL\n_on_exit() — live only"]
     end
 
-    subgraph EVENTS ["Trigger Events"]
-        E1[":rotating_light: SIGTERM\nwith open position\n_handle_shutdown()"]
-        E2[":red_circle: DB conn exhausted\nafter max retries\n_pg_connect_with_retry()"]
-        E3[":zap: Trade ENTRY\n_on_signal()\nlive only"]
-        E4[":white_check_mark: Trade EXIT + PnL\n_on_exit()\nlive only"]
+    subgraph AD_SRC ["audit_daemon.py — quality events"]
+        A1["WARN escalated to ERROR\nfired once per incident"]
+        A2["ERROR escalated to CRITICAL\nfired once per incident"]
+        A3["AUDIT_HALT written\ntrading_constants CRITICAL"]
+        A4["incident auto-resolved\n2 clean passes"]
     end
 
-    SA["_send_alert(config, message)\nurllib.request.urlopen()\ntimeout=8s · non-fatal"]
+    subgraph GATE ["Activation"]
+        G1["live_trader: alerts.enabled=true\n+ SLACK_WEBHOOK_URL in .env"]
+        G2["audit_daemon: SLACK_WEBHOOK_URL\nin .env — no other gate"]
+    end
 
-    CONFIG --> SA
-    E1 -->|"on_emergency_flatten"| SA
-    E2 -->|"on_connection_loss"| SA
-    E3 -->|"on_trade_fill + not dry_run"| SA
-    E4 -->|"on_trade_fill + not dry_run"| SA
-    SA -->|"POST application/json\n{text: message}"| SLACK["💬 Slack\nWebhook"]
+    SLACK3["💬 Slack Webhook\nPOST application/json\ntimeout=8s · non-fatal"]
 
-    DRY["dry_run=True\n→ entry/exit alerts\nsuppressed"]
+    E1 --> SLACK3
+    E2 --> SLACK3
+    E3 --> SLACK3
+    E4 --> SLACK3
+    A1 --> SLACK3
+    A2 --> SLACK3
+    A3 --> SLACK3
+    A4 --> SLACK3
+    GATE --> SLACK3
 
-    style SA fill:#2e2a1a,stroke:#d29922
-    style SLACK fill:#1a2e1a,stroke:#3fb950
-    style DRY fill:#21262d,stroke:#30363d
+    style LT_SRC fill:#1f1a2e,stroke:#bc8cff33
+    style AD_SRC fill:#1a1020,stroke:#bc8cff,stroke-width:2px
+    style SLACK3 fill:#1a2e1a,stroke:#3fb950,stroke-width:2px
+    style GATE fill:#21262d,stroke:#30363d
     </div>
   </div>
 </section>
@@ -448,6 +476,160 @@ flowchart LR
     Now <code style="color:var(--blue);">_poll_bars_since()</code> and <code style="color:var(--blue);">_poll_latest_bar()</code>
     aggregate <code style="color:var(--green);">ask_volume</code> / <code style="color:var(--green);">bid_volume</code>
     from <code style="color:var(--blue);">is_buy</code> in the ticks table — all six features are live.
+  </div>
+</section>
+
+<!-- ─── AUDIT DAEMON ─────────────────────────────────────────────────── -->
+<section id="audit">
+  <h2>Audit Daemon — 24/7 Cycle <span class="tag tag-py">scripts/audit_daemon.py</span></h2>
+  <div class="card">
+    <div class="mermaid">
+flowchart TD
+    LOAD["_load_live_config()\nlive_config.json"] --> C1
+
+    subgraph CHECKS ["10 checks per cycle"]
+        direction LR
+        C1["data_freshness\nlast tick recency vs RTH threshold"]
+        C2["rejection_rate\nquality_metrics rejection_rate_pct"]
+        C3["gap_count\nsentinel_gaps metric"]
+        C4["session_health\nlatest sessions row"]
+        C5["wal_health\nwal.bin size vs 1 MB"]
+        C6["disk_space\nfree disk vs 5 GB floor"]
+        C7["contamination_audit\ncontamination_audit.py --json"]
+        C8["cpp_tests\nctest --output-on-failure"]
+        C9["trading_constants\npoint_value tick_value symbol commission_rt"]
+        C10["pnl_sanity\nlive_trades ABS pnl_usd > 500 last 24h"]
+    end
+
+    CHECKS --> ESC["EscalationEngine.process(results)\nenforces quality_rules/escalation.yaml"]
+
+    ESC --> DB2["write_metric() → quality_metrics\nwrite_event() → audit_log"]
+    ESC --> STAT["atomic write\ndata/audit_status.json\n{status, checks, audit_halt, run_count}"]
+    DB2 --> SLEEP
+    STAT --> SLEEP
+
+    ESC -->|"3 WARNs in 60 min\nalert once"| W2E["status promoted ERROR\nSlack WARN→ERROR alert"]
+    ESC -->|"ERROR unresolved 30 min\nalert once"| E2C["status promoted CRITICAL\nSlack CRITICAL alert"]
+    E2C -->|"check = trading_constants"| HALT["write data/AUDIT_HALT\n{check, message, timestamp}\nlive_trader refuses start"]
+    ESC -->|"2 consecutive clean passes\nalert once"| RESOLVE["all errors auto-resolved\nSlack resolved alert\ncounters reset"]
+
+    SLEEP["sleep 120-600s\nadaptive: x2 after 10 consecutive clean passes"] --> LOAD
+
+    style CHECKS fill:#1a1f2e,stroke:#30363d
+    style ESC fill:#1f1a2e,stroke:#bc8cff,stroke-width:2px
+    style HALT fill:#2e1a1a,stroke:#f85149,stroke-width:2px
+    style RESOLVE fill:#0d2818,stroke:#3fb950
+    style W2E fill:#2e2010,stroke:#d29922
+    style E2C fill:#2e1a1a,stroke:#f85149
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">audit_daemon.service — key directives</div>
+    <div style="font-family:monospace;font-size:11px;color:var(--text2);line-height:2;">
+      <span style="color:var(--blue);">Restart</span>=<span style="color:var(--green);">always</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># comes back even on clean exit — must run 24/7</span><br>
+      <span style="color:var(--blue);">RestartSec</span>=<span style="color:var(--green);">10s</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># back within 10s of any crash</span><br>
+      <span style="color:var(--blue);">EnvironmentFile</span>=<span style="color:var(--green);">/home/opc/rithmic_engine/.env</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># loads SLACK_WEBHOOK_URL, PG_PASSWORD, etc.</span><br>
+      <span style="color:var(--blue);">ExecStart</span>=<span style="color:var(--green);">python3 scripts/audit_daemon.py --interval 300</span><br>
+      <span style="color:var(--blue);">After</span>=<span style="color:var(--green);">postgresql-16.service</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--blue);">Requires</span>=<span style="color:var(--green);">postgresql-16.service</span>&nbsp;&nbsp;&nbsp;
+      <span style="color:var(--text2);"># independent of nq_executor — audits even when not trading</span>
+    </div>
+  </div>
+</section>
+
+<!-- ─── ESCALATION POLICY ─────────────────────────────────────────────── -->
+<section id="escalation">
+  <h2>Escalation Policy — Per-Check Lifecycle <span class="tag tag-py">EscalationEngine</span></h2>
+  <div class="grid2">
+    <div class="card">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">State machine — each check tracked independently in memory</div>
+      <div class="mermaid">
+stateDiagram-v2
+    [*] --> CLEAN : check starts passing
+
+    CLEAN --> ACCUMULATING : check returns WARN
+    ACCUMULATING --> ACCUMULATING : WARN again / still under 3 in 60 min
+    ACCUMULATING --> CLEAN : PASS / counter reset
+    ACCUMULATING --> ERROR_SEEN : 3rd WARN in 60 min / Slack WARN→ERROR alert
+
+    CLEAN --> ERROR_SEEN : check returns FAIL or ERROR
+    ERROR_SEEN --> CRITICAL : unresolved 30+ min / Slack CRITICAL alert
+    CRITICAL --> CRITICAL : still failing every cycle
+
+    ERROR_SEEN --> RESOLVING : check returns PASS
+    CRITICAL --> RESOLVING : check returns PASS
+    RESOLVING --> RESOLVING : 1st consecutive clean pass
+    RESOLVING --> CLEAN : 2nd clean pass / Slack resolved alert / counters cleared
+      </div>
+    </div>
+    <div class="card">
+      <div style="font-size:11px;color:var(--text2);margin-bottom:12px;">Alert deduplication — each key fires at most once per incident</div>
+      <div class="mermaid">
+flowchart TD
+    CHK{"check result"}
+    CHK -->|"WARN"| WH["add timestamp\nto warn_history[check]"]
+    WH --> WC{"3+ WARNs\nin 60 min?"}
+    WC -->|"no"| SKIP["no action"]
+    WC -->|"yes"| KEY1{"warn_esc:check\nalready alerted?"}
+    KEY1 -->|"yes"| SKIP
+    KEY1 -->|"no"| FIRE1["mark alerted\nSlack: WARN→ERROR\nwrite audit_log ERROR"]
+
+    CHK -->|"FAIL / ERROR"| ET["record error_since[check]\n= now if first time"]
+    ET --> AGE{"elapsed\n≥ 30 min?"}
+    AGE -->|"no"| SKIP
+    AGE -->|"yes"| KEY2{"crit:check\nalready alerted?"}
+    KEY2 -->|"yes"| SKIP
+    KEY2 -->|"no"| FIRE2["mark alerted\nSlack: CRITICAL\nwrite audit_log CRITICAL"]
+    FIRE2 -->|"check = trading_constants"| WRITEHALT["write data/AUDIT_HALT"]
+
+    CHK -->|"PASS x2"| CLEAR["clear error_since\nclear warn_history\nclear alerted keys\nSlack: resolved"]
+
+    style FIRE1 fill:#2e2010,stroke:#d29922
+    style FIRE2 fill:#2e1a1a,stroke:#f85149
+    style WRITEHALT fill:#2e1a1a,stroke:#f85149,stroke-width:2px
+    style CLEAR fill:#0d2818,stroke:#3fb950
+    style SKIP fill:#21262d,stroke:#30363d
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px;">
+    <div style="font-size:11px;color:var(--text2);margin-bottom:8px;">Alert sources — Slack receives from two independent paths</div>
+    <div class="mermaid">
+flowchart LR
+    subgraph LT_ALERTS ["live_trader.py alerts (trade events)"]
+        LA1[":rotating_light: SIGTERM with open position"]
+        LA2[":red_circle: DB connection exhausted"]
+        LA3[":zap: Trade ENTRY — live only"]
+        LA4[":white_check_mark: Trade EXIT + PnL — live only"]
+    end
+
+    subgraph AD_ALERTS ["audit_daemon.py alerts (quality events)"]
+        AA1[":warning: WARN escalated to ERROR"]
+        AA2[":red_circle: ERROR escalated to CRITICAL"]
+        AA3[":octagonal_sign: AUDIT_HALT written"]
+        AA4[":white_check_mark: incident auto-resolved"]
+    end
+
+    SLACK2["💬 Slack Webhook\nSLACK_WEBHOOK_URL env var"]
+
+    LA1 --> SLACK2
+    LA2 --> SLACK2
+    LA3 --> SLACK2
+    LA4 --> SLACK2
+    AA1 --> SLACK2
+    AA2 --> SLACK2
+    AA3 --> SLACK2
+    AA4 --> SLACK2
+
+    style LT_ALERTS fill:#1f1a2e,stroke:#bc8cff33
+    style AD_ALERTS fill:#1a1020,stroke:#bc8cff,stroke-width:2px
+    style SLACK2 fill:#1a2e1a,stroke:#3fb950
+    </div>
   </div>
 </section>
 
@@ -1118,13 +1300,18 @@ flowchart TD
 
     K{"Gate K\ntrade_route ≠\nsimulator?"}
     K -->|FAIL| HALT
-    K -->|PASS| LAUNCH
+    K -->|PASS| L
 
-    LAUNCH([✅ Launch live_trader.py])
+    L{"Gate L\naudit_daemon active\nno AUDIT_HALT?"}
+    L -->|FAIL| HALT
+    L -->|PASS| LAUNCH
+
+    LAUNCH([✅ Promote dry_run=false\nlive_trader.py starts])
 
     style HALT fill:#2e1a1a,stroke:#f85149,color:#f85149
     style LAUNCH fill:#0d2818,stroke:#3fb950,color:#3fb950
     style START fill:#1f1a2e,stroke:#bc8cff
+    style L fill:#1a1020,stroke:#bc8cff,stroke-width:2px
     </div>
   </div>
 </section>
@@ -1158,10 +1345,12 @@ graph LR
 </main>
 
 <footer style="text-align:center;padding:32px;color:var(--text2);font-size:11px;border-top:1px solid var(--border);margin-top:32px;">
-  Rithmic Engine — MNQ ORB Strategy &nbsp;·&nbsp; Oracle VM 170.9.233.177 &nbsp;·&nbsp; v2 · Updated 2026-05-02
+  Rithmic Engine — MNQ ORB Strategy &nbsp;·&nbsp; Oracle VM 170.9.233.177 &nbsp;·&nbsp; v3 · Updated 2026-05-02
   &nbsp;·&nbsp; <span style="color:var(--green);">systemd enabled</span>
   &nbsp;·&nbsp; <span style="color:var(--green);">order-flow features live</span>
   &nbsp;·&nbsp; <span style="color:var(--green);">Slack alerts wired</span>
+  &nbsp;·&nbsp; <span style="color:var(--purple);">24/7 audit daemon</span>
+  &nbsp;·&nbsp; <span style="color:var(--purple);">escalation engine</span>
 </footer>
 
 <script>
