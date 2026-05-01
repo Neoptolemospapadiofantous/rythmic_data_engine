@@ -562,7 +562,9 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                 resp.ParseFromString(payload);
                 bool ok = !resp.rp_code().empty() && resp.rp_code(0) == "0";
                 if (!ok) {
-                    LOG("[EXECUTOR] FATAL: MD login failed");
+                    std::string rpc = resp.rp_code().empty() ? "?" : resp.rp_code(0);
+                    std::string txt = resp.rp_code().size() > 1 ? resp.rp_code(1) : "";
+                    LOG("[EXECUTOR] FATAL: MD login failed — rp_code=%s %s", rpc.c_str(), txt.c_str());
                     co_return;
                 }
                 double hb_interval = resp.heartbeat_interval();
@@ -857,10 +859,9 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
                 // ── Startup reconciliation ────────────────────────────────────────
                 // is_snapshot=1 messages arrive right after subscribing for order updates
-                // and reflect the exchange's current open orders — including any position
-                // left open by a prior executor session that was killed mid-trade.
-                // A WORKING order for our symbol means an unmanaged open position exists.
-                // Halt new entries immediately so we never add a second contract.
+                // and reflect open orders still live at the exchange from a prior session
+                // (e.g. executor killed mid-trade).  Cancel every such order automatically
+                // so residual stops can't fire against a new position this session.
                 if (notif.is_snapshot()) {
                     LOG("[EXECUTOR] [RECON] snapshot: basket=%s status=%s "
                         "filled=%d unfilled=%d sym=%s",
@@ -868,16 +869,23 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                         notif.total_fill_size(), notif.total_unfilled_size(),
                         notif.symbol().c_str());
                     if (notif.symbol() == trade_symbol &&
-                        (notif.status() == "WORKING" || notif.status() == "ACTIVE")) {
-                        LOG("[EXECUTOR] CRITICAL: %s order for %s detected on startup "
-                            "(basket=%s) — open position from prior session. "
-                            "New entries HALTED. Close position on Legends platform.",
-                            notif.status().c_str(), trade_symbol.c_str(),
-                            notif.basket_id().c_str());
-                        strategy.halt_trading("startup_open_position");
-                        audit_log.error("risk.halted", "startup open position detected — halting new entries");
-                        flush_position(db.get(), today, order_mgr, strategy,
-                                       order_plant->connected, orb_cfg.point_value);
+                        (notif.status() == "WORKING" || notif.status() == "ACTIVE") &&
+                        !notif.basket_id().empty()) {
+                        LOG("[EXECUTOR] [RECON] cancelling residual %s order basket=%s",
+                            notif.status().c_str(), notif.basket_id().c_str());
+                        rti::RequestCancelOrder cancel_req;
+                        cancel_req.set_template_id(316);
+                        cancel_req.set_basket_id(notif.basket_id());
+                        cancel_req.set_account_id(orb_cfg.account_id);
+                        cancel_req.set_fcm_id(orb_cfg.fcm_id);
+                        cancel_req.set_ib_id(orb_cfg.ib_id);
+                        try {
+                            co_await ws_write(*order_plant->ws, proto_frame(cancel_req));
+                            LOG("[EXECUTOR] [RECON] cancel sent — basket=%s",
+                                notif.basket_id().c_str());
+                        } catch (std::exception& e) {
+                            LOG("[EXECUTOR] [RECON] cancel send failed: %s", e.what());
+                        }
                     }
                     continue;  // never process snapshots as live fills
                 }
@@ -1163,6 +1171,7 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
 
             // ── login ────────────────────────────────────────────────────────
             bool login_ok = false;
+            bool auth_rejected = false;  // true = server said no, false = network error
             try {
                 rti::RequestLogin req;
                 req.set_template_id(10); req.set_template_version("3.9");
@@ -1182,12 +1191,17 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
                     if (b.template_id() == 11) {
                         rti::ResponseLogin resp; resp.ParseFromString(pl);
                         login_ok = !resp.rp_code().empty() && resp.rp_code(0) == "0";
+                        if (!login_ok) auth_rejected = true;
                         break;
                     }
                 }
             } catch (...) { login_ok = false; }
             if (!login_ok) {
-                LOG("[LEGENDS_MD] Login failed — retry in 30s");
+                if (auth_rejected) {
+                    LOG("[LEGENDS_MD] Login rejected by server — stopping (check credentials/permissions)");
+                    co_return;
+                }
+                LOG("[LEGENDS_MD] Login failed (network) — retry in 30s");
                 asio::steady_timer t(ex); t.expires_after(std::chrono::seconds(30));
                 co_await t.async_wait(asio::use_awaitable); continue;
             }
@@ -1457,7 +1471,12 @@ asio::awaitable<void> run_executor(const OrbConfig& orb_cfg,
         SdkConnParams sdk_conn = SdkConnParams::from_env();
         SdkMdFeed sdk_feed(orb_cfg, sdk_conn, ex, strategy, order_mgr);
         if (!sdk_feed.start()) {
-            LOG("[EXECUTOR] SDK MD feed failed to start — halting");
+            if (sdk_feed.auth_rejected()) {
+                LOG("[EXECUTOR] SDK MD login rejected by server — stopping (check credentials/permissions)");
+                g_running = false;
+            } else {
+                LOG("[EXECUTOR] SDK MD feed failed to start — halting");
+            }
             ioc_ref.stop();
             co_return;
         }
