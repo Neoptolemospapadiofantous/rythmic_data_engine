@@ -1,0 +1,56 @@
+# systemd unit for audit_daemon (continuous 24/7 audit + escalation daemon)
+#
+# Install:  sudo cp deploy/audit_daemon.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable audit_daemon
+#           sudo systemctl start audit_daemon
+#
+# Logs:     journalctl -u audit_daemon -f
+# Status:   sudo systemctl status audit_daemon
+# Once:     python scripts/audit_daemon.py --once
+
+[Unit]
+Description=Rithmic Engine Audit Daemon (continuous quality + escalation)
+Documentation=https://github.com/neoptolemospapadiofantous/rithmic_engine
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+Requires=postgresql-16.service
+# Audit daemon should start independently of the trading executor
+# (we want it auditing even when nq_executor is not running)
+
+[Service]
+Type=simple
+
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/rithmic_engine
+
+# Load credentials (PG_HOST, PG_PASSWORD, SLACK_WEBHOOK_URL, etc.)
+EnvironmentFile=/home/opc/rithmic_engine/.env
+
+ExecStart=/usr/bin/python3 /home/opc/rithmic_engine/scripts/audit_daemon.py \
+    --interval 300
+
+# Always restart — this must run 24/7 regardless of why it exited
+Restart=always
+RestartSec=10s
+
+# No start timeout needed (daemon connects to PG on each cycle, not at start)
+TimeoutStartSec=30s
+
+# Allow up to 10 s for clean shutdown
+TimeoutStopSec=10s
+KillMode=process
+KillSignal=SIGTERM
+
+# Route stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=audit_daemon
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

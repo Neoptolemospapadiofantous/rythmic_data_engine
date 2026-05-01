@@ -30,6 +30,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -367,6 +368,49 @@ def _gate_trade_route(cfg: dict) -> GateResult:
     )
 
 
+def _gate_audit_daemon(_cfg: dict) -> GateResult:
+    """Gate L: audit_daemon systemd service must be active before going live.
+
+    We never want the continuous monitoring layer absent while trading is live.
+    If systemctl is unavailable (non-systemd host), the gate is skipped rather
+    than blocking promotion.
+    """
+    audit_halt = Path("data/AUDIT_HALT")
+    if audit_halt.exists():
+        try:
+            detail = json.loads(audit_halt.read_text()).get("message", "(unknown)")
+        except Exception:
+            detail = audit_halt.read_text().strip()[:120]
+        return GateResult(
+            "L. audit_daemon active / no AUDIT_HALT",
+            False,
+            f"AUDIT_HALT present: {detail}  — resolve and remove data/AUDIT_HALT",
+        )
+
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", "audit_daemon"],
+            capture_output=True, text=True, timeout=5,
+        )
+        active = r.stdout.strip() == "active"
+        if active:
+            return GateResult("L. audit_daemon active / no AUDIT_HALT", True)
+        state = r.stdout.strip() or "inactive"
+        return GateResult(
+            "L. audit_daemon active / no AUDIT_HALT",
+            False,
+            f"audit_daemon service is '{state}' — start with: sudo systemctl start audit_daemon",
+        )
+    except FileNotFoundError:
+        return GateResult(
+            "L. audit_daemon active / no AUDIT_HALT",
+            True,
+            "SKIP — systemctl not available on this host",
+        )
+    except Exception as e:
+        return GateResult("L. audit_daemon active / no AUDIT_HALT", False, str(e))
+
+
 _ALL_GATES = [
     _gate_no_deploy,
     _gate_config_valid,
@@ -379,6 +423,7 @@ _ALL_GATES = [
     _gate_prop_firm,
     _gate_account_equity,
     _gate_trade_route,
+    _gate_audit_daemon,
 ]
 
 
@@ -534,6 +579,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "  I. Prop firm limits set (daily_loss_limit > 0, max_position_size > 0)\n"
             "  J. Account equity above minimum (when PNL_PLANT_EQUITY env var is set)\n"
             "  K. trade_route is not 'simulator'\n"
+            "  L. audit_daemon service active and no AUDIT_HALT sentinel\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
