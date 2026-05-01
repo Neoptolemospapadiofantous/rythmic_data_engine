@@ -34,3 +34,5 @@ models/*.joblib
 # Keep checksums file (committed intentionally)
 !config/model_checksums.json
 *.png
+*.wal
+*.docx
