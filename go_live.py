@@ -369,11 +369,11 @@ def _gate_trade_route(cfg: dict) -> GateResult:
 
 
 def _gate_audit_daemon(_cfg: dict) -> GateResult:
-    """Gate L: audit_daemon systemd service must be active before going live.
+    """Gate L: audit_daemon must be running before going live.
 
-    We never want the continuous monitoring layer absent while trading is live.
-    If systemctl is unavailable (non-systemd host), the gate is skipped rather
-    than blocking promotion.
+    Accepts either the systemd service (production) or a local process
+    (development / non-systemd host).  AUDIT_HALT sentinel is checked first —
+    if present the daemon found a blocking inconsistency.
     """
     audit_halt = Path("data/AUDIT_HALT")
     if audit_halt.exists():
@@ -387,28 +387,41 @@ def _gate_audit_daemon(_cfg: dict) -> GateResult:
             f"AUDIT_HALT present: {detail}  — resolve and remove data/AUDIT_HALT",
         )
 
+    # Check systemd service (production)
     try:
         r = subprocess.run(
             ["systemctl", "is-active", "audit_daemon"],
             capture_output=True, text=True, timeout=5,
         )
-        active = r.stdout.strip() == "active"
-        if active:
+        if r.stdout.strip() == "active":
             return GateResult("L. audit_daemon active / no AUDIT_HALT", True)
-        state = r.stdout.strip() or "inactive"
-        return GateResult(
-            "L. audit_daemon active / no AUDIT_HALT",
-            False,
-            f"audit_daemon service is '{state}' — start with: sudo systemctl start audit_daemon",
-        )
     except FileNotFoundError:
-        return GateResult(
-            "L. audit_daemon active / no AUDIT_HALT",
-            True,
-            "SKIP — systemctl not available on this host",
-        )
+        pass  # no systemctl — fall through to pgrep check
     except Exception as e:
         return GateResult("L. audit_daemon active / no AUDIT_HALT", False, str(e))
+
+    # Fallback: check for running local process (development / non-systemd)
+    try:
+        pr = subprocess.run(
+            ["pgrep", "-f", "audit_daemon.py"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if pr.returncode == 0 and pr.stdout.strip():
+            pid = pr.stdout.strip().split()[0]
+            return GateResult(
+                "L. audit_daemon active / no AUDIT_HALT",
+                True,
+                f"daemon running as local process PID {pid}",
+            )
+    except Exception:
+        pass
+
+    return GateResult(
+        "L. audit_daemon active / no AUDIT_HALT",
+        False,
+        "audit_daemon not running — start with: "
+        "python scripts/audit_daemon.py  or  sudo systemctl start audit_daemon",
+    )
 
 
 _ALL_GATES = [
