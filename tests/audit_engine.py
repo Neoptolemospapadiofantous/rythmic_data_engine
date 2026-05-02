@@ -521,7 +521,6 @@ def check_python_data(conn) -> bool:
            f"{buy_pct:.1f}% buys in last 1000 ticks")
 
     # ── data freshness (last tick within 3 trading days) ─────────────
-    import datetime
     latest = pd.to_datetime(df["ts_event"].max(), utc=True)
     now_utc = pd.Timestamp.now(tz="UTC")
     age_hours = (now_utc - latest).total_seconds() / 3600

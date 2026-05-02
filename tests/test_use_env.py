@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
@@ -240,7 +240,6 @@ def test_config_schema_passes_for_valid_live_config():
     """check_config_schema must PASS for the real live_config.json."""
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from audit_daemon import check_config_schema
-    import json
     cfg = json.loads((REPO_ROOT / "config" / "live_config.json").read_text())
     r = check_config_schema(cfg)
     assert r["status"] in ("PASS", "INFO"), f"Expected PASS or INFO, got: {r}"
@@ -251,7 +250,6 @@ def test_config_schema_warns_for_invalid_config():
     """check_config_schema must WARN when point_value is wrong."""
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
     from audit_daemon import check_config_schema
-    import json
     cfg = json.loads((REPO_ROOT / "config" / "live_config.json").read_text())
     cfg["point_value"] = 20.0  # NQ value — wrong for MNQ
     r = check_config_schema(cfg)

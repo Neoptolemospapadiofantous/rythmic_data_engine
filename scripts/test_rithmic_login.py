@@ -80,7 +80,8 @@ def _read_varint(data, pos):
     result = 0
     shift = 0
     while pos < len(data):
-        b = data[pos]; pos += 1
+        b = data[pos]
+        pos += 1
         result |= (b & 0x7F) << shift
         shift += 7
         if not (b & 0x80):
@@ -163,7 +164,7 @@ async def test_login(user, password, system_name, plant, url):
     infra_type = INFRA.get(plant, 2)
     ssl_ctx = _make_ssl_ctx()
 
-    print(f"\n=== Step 1: probe system info ===")
+    print("\n=== Step 1: probe system info ===")
     print(f"Connecting to {url} ...")
     try:
         async with websockets.connect(url, ssl=ssl_ctx, max_size=2**20) as ws:
@@ -197,10 +198,10 @@ async def test_login(user, password, system_name, plant, url):
         print(f"ERROR: {e}")
         return
 
-    print(f"\n=== Step 2: login ===")
+    print("\n=== Step 2: login ===")
     try:
         async with websockets.connect(url, ssl=ssl_ctx, max_size=2**20) as ws:
-            print(f"Reconnected — sending RequestLogin")
+            print("Reconnected — sending RequestLogin")
             print(f"  user={user}  system={system_name}  plant={plant}")
             payload = build_request_login(user, password, system_name, infra_type)
             await ws.send(frame(payload))
@@ -220,7 +221,7 @@ async def test_login(user, password, system_name, plant, url):
             uid        = resp.get(153428, [])
             user_msgs  = resp.get(132760, [])
 
-            print(f"\n--- Response ---")
+            print("\n--- Response ---")
             print(f"  template_id    : {resp.get(154467)}")
             print(f"  rp_code        : {rp_codes}")
             print(f"  user_msg       : {user_msgs}")

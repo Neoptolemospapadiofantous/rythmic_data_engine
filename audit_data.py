@@ -205,8 +205,8 @@ def check_date_range(conn) -> tuple[datetime, datetime] | None:
         result("Overlap", WARN,
                f"no overlap — gap of {gap_days} days between sources")
         print(f"\n  Parquet ends {overlap_end.date()}, PG starts {pg_start.date()}.")
-        print(f"  Schema and precision checks will still run.")
-        print(f"  Tick count / bar / gap checks need overlapping data.")
+        print("  Schema and precision checks will still run.")
+        print("  Tick count / bar / gap checks need overlapping data.")
         return None
 
     overlap_days = (overlap_end - overlap_start).days
@@ -278,7 +278,7 @@ def check_tick_counts(conn, start: datetime, end: datetime) -> bool:
         print(f"  {day:<12} {pg_n:>10,} {par_n:>10,} {pct_str:>8}{flag}")
 
     days_ok = sum(1 for *_, pct in divergences if pct <= 20)
-    result(f"\n  Days within 20% delta", PASS if days_ok == len(all_days) else WARN,
+    result("\n  Days within 20% delta", PASS if days_ok == len(all_days) else WARN,
            f"{days_ok}/{len(all_days)}")
 
     return pct_total < 20

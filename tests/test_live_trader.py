@@ -19,7 +19,7 @@ import tempfile
 import unittest
 import zoneinfo
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -327,7 +327,8 @@ class TestSigtermHandler(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             # Give it a moment to start
-            import time; time.sleep(0.5)
+            import time
+            time.sleep(0.5)
             proc.send_signal(signal.SIGTERM)
             try:
                 proc.wait(timeout=5)
@@ -699,7 +700,6 @@ class TestEodFlatten(unittest.TestCase):
 
     def test_eod_flatten_stops_loop(self):
         """_maybe_eod after rth_close must set _running=False."""
-        import live_trader
         with tempfile.TemporaryDirectory() as tmpdir:
             trader, _, _ = self._make_trader_in_position(tmpdir)
             trader._running = True
@@ -711,7 +711,6 @@ class TestEodFlatten(unittest.TestCase):
 
     def test_eod_flatten_sets_done_flag(self):
         """_maybe_eod must set _eod_flatten_done=True to prevent re-triggering."""
-        import live_trader
         with tempfile.TemporaryDirectory() as tmpdir:
             trader, _, _ = self._make_trader_in_position(tmpdir)
             now_et = datetime.datetime(2026, 1, 2, 9, 32, tzinfo=ET)
@@ -720,7 +719,6 @@ class TestEodFlatten(unittest.TestCase):
 
     def test_eod_flatten_idempotent(self):
         """Calling _maybe_eod twice must not double-exit."""
-        import live_trader
         with tempfile.TemporaryDirectory() as tmpdir:
             trader, mock_conn, _ = self._make_trader_in_position(tmpdir)
             now_et = datetime.datetime(2026, 1, 2, 9, 32, tzinfo=ET)
@@ -733,7 +731,6 @@ class TestEodFlatten(unittest.TestCase):
 
     def test_eod_not_triggered_before_close(self):
         """_maybe_eod must not flatten before rth_close."""
-        import live_trader
         with tempfile.TemporaryDirectory() as tmpdir:
             trader, _, _ = self._make_trader_in_position(tmpdir)
             trader._running = True
@@ -771,7 +768,7 @@ class TestBarLoopReconnectLimit(unittest.TestCase):
 
     def test_reconnect_counter_resets_on_success(self):
         """A successful _poll_latest_bar must reset _reconnect_failures to 0."""
-        import live_trader, psycopg2
+        import live_trader
         with tempfile.TemporaryDirectory() as tmpdir:
             trader = self._make_trader(tmpdir)
             trader._reconnect_failures = 5

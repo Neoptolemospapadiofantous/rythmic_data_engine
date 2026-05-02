@@ -312,9 +312,6 @@ def compute_features(bars: list[dict], orb_period: int = ORB_PERIOD) -> dict[str
     macd_line = macd_hist_vals[-1]
     macd_signal = _ema(macd_hist_vals, 9)
     macd_histogram = macd_line - macd_signal
-    # Keep ema_12 / ema_26 consistent with the incremental values above
-    ema_12 = _e12
-    ema_26 = _e26
 
     # Stochastic(14, 3)
     stoch_k = _stoch_k(bars, 14)

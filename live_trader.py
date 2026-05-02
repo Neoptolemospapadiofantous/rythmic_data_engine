@@ -198,9 +198,11 @@ def _reconcile_position(conn, config: dict, strategy: MicroORBStrategy,
                 LIMIT 1
             """, (today,))
             cpp_row = cur.fetchone()
-        except Exception:
-            conn.rollback()  # reset aborted transaction so subsequent queries work
+        except Exception as exc:
+            conn.rollback()
             cpp_row = None  # live_trades table may not exist in all environments
+            if "does not exist" not in str(exc).lower():
+                logging.getLogger("live_trader").warning("_reconcile_position: unexpected error: %s", exc)
 
     if cpp_row is not None:
         if open_row is not None:
@@ -287,8 +289,9 @@ def _update_trade_order_id(conn, trade_id: int, order_id: str) -> None:
         with conn.cursor() as cur:
             cur.execute("UPDATE trades SET order_id = %s WHERE id = %s", (order_id, trade_id))
         conn.commit()
-    except Exception:
-        conn.rollback()  # reset aborted transaction; order_id column is optional
+    except Exception as exc:
+        logging.getLogger("live_trader").warning("_update_trade_order_id failed (order_id not recorded): %s", exc)
+        conn.rollback()
 
 
 def _write_trade_close(conn, trade_id: int, exit_price: float, exit_ts: datetime.datetime,

@@ -25,7 +25,7 @@ import argparse
 import logging
 import subprocess
 import sys
-from datetime import date, datetime, timezone
+from datetime import date
 from pathlib import Path
 from typing import Optional
 

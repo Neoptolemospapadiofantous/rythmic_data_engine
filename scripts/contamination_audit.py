@@ -368,7 +368,7 @@ def main():
         sys.exit(1 if failed > 0 else 0)
 
     print(f"\n{'='*60}")
-    print(f"  ENGINE CONTAMINATION & DATA INTEGRITY AUDIT")
+    print("  ENGINE CONTAMINATION & DATA INTEGRITY AUDIT")
     print(f"  {passed} passed, {failed} failed, {len(all_findings)} total")
     print(f"{'='*60}")
 

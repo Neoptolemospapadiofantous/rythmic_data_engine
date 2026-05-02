@@ -1,0 +1,24 @@
+# Production runtime dependencies for rithmic_engine.
+# Install: pip install -r requirements.txt
+#
+# Version pins are minimum bounds (>=) to stay compatible with Oracle's
+# Python 3.9 and future upgrades. Exact pins are in requirements-dev.txt.
+
+# Database
+psycopg2-binary>=2.9
+
+# Data processing (features.py, audit_data.py, pipeline_run.py)
+pandas>=2.0
+pytz>=2024.1
+
+# Config validation (config/live_config_schema.py)
+pydantic>=2.0
+
+# Web UI (ui/app.py)
+flask>=3.0
+
+# Proto feed (src/ C++ build uses protobuf; Python parses proto messages)
+protobuf>=5.0
+
+# Optional: .env file loading (live_trader.py has a fallback if missing)
+python-dotenv>=1.0

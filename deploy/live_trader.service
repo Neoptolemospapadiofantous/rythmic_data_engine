@@ -1,0 +1,57 @@
+# systemd unit for live_trader.py (Python ORB trading loop)
+#
+# Install:  sudo cp deploy/live_trader.service /etc/systemd/system/
+#           sudo systemctl daemon-reload
+#           sudo systemctl enable live_trader
+#           sudo systemctl start live_trader
+#
+# Logs:     journalctl -u live_trader -f
+# Status:   sudo systemctl status live_trader
+# Stop:     sudo systemctl stop live_trader
+
+[Unit]
+Description=Rithmic Engine Live Trader (Python ORB strategy)
+Documentation=https://github.com/neoptolemospapadiofantous/rithmic_engine
+After=network-online.target postgresql-16.service audit_daemon.service
+Wants=network-online.target
+Requires=postgresql-16.service
+# live_trader does not require audit_daemon but should start after it
+# so the first audit cycle has run before any trading begins
+
+[Service]
+Type=simple
+
+User=opc
+Group=opc
+WorkingDirectory=/home/opc/rithmic_engine
+
+# Load credentials (PG_HOST, PG_PASSWORD, SLACK_WEBHOOK_URL, etc.)
+EnvironmentFile=/home/opc/rithmic_engine/.env
+
+# Preflight: refuse to start if NO_DEPLOY or AUDIT_HALT sentinel is present
+ExecStartPre=/usr/bin/test ! -f /home/opc/rithmic_engine/NO_DEPLOY
+ExecStartPre=/usr/bin/test ! -f /home/opc/rithmic_engine/data/AUDIT_HALT
+
+ExecStart=/usr/bin/python3 /home/opc/rithmic_engine/live_trader.py \
+    --config /home/opc/rithmic_engine/config/live_config.json
+
+# Do NOT auto-restart — a crash must be investigated before re-starting
+# Use: sudo systemctl start live_trader (manual restart after review)
+Restart=no
+
+# Allow up to 30 s for clean shutdown (EOD flatten + DB write)
+TimeoutStopSec=30s
+KillMode=process
+KillSignal=SIGTERM
+
+# Route stdout/stderr to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=live_trader
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

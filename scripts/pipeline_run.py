@@ -18,15 +18,13 @@ from __future__ import annotations
 import argparse
 import cProfile
 import csv
-import functools
 import io
 import json
-import os
 import pstats
 import sys
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, date
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable
 
@@ -437,7 +435,7 @@ class MLComparisonReport:
             elif delta_pnl < 0:
                 print(f"\n  VERDICT: ML OFF outperforms ML ON by ${-delta_pnl:.2f}/session avg.")
             else:
-                print(f"\n  VERDICT: No difference in avg P&L between ML ON and ML OFF.")
+                print("\n  VERDICT: No difference in avg P&L between ML ON and ML OFF.")
         print()
 
     def save_csv(self, path: Path) -> None:
@@ -557,7 +555,7 @@ def _add_mock_session(
     n: int = 1,
 ) -> None:
     """Add synthetic sessions so --compare-ml --mock works without real data."""
-    import math, random
+    import random
     rng = random.Random(42 + len(report.sessions_ml_on) + len(report.sessions_ml_off))
     for i in range(n):
         # ML ON: slightly higher win rate and P&L by design

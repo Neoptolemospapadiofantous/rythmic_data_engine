@@ -35,7 +35,6 @@ sys.path.insert(0, str(REPO_ROOT / "strategy"))
 
 from strategy.features import (
     _FEATURE_NAMES,
-    ORB_PERIOD,
     _atr,
     _bb,
     _ema,

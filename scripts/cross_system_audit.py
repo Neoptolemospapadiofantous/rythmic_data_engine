@@ -84,11 +84,11 @@ def check_cpp_tick_value() -> list[dict]:
             used_const = slippage_m.group(1)
             if used_const == "MNQ_TICK_VALUE":
                 findings.append(_pass("latency_logger_uses_mnq",
-                    f"latency_logger.hpp uses MNQ_TICK_VALUE for slippage_usd (correct for MNQ)"))
+                    "latency_logger.hpp uses MNQ_TICK_VALUE for slippage_usd (correct for MNQ)"))
             elif used_const == "NQ_TICK_VALUE":
                 findings.append(_fail("latency_logger_uses_mnq",
-                    f"latency_logger.hpp uses NQ_TICK_VALUE ($5.00) for slippage_usd — "
-                    f"should use MNQ_TICK_VALUE ($0.50) — 10x inflated for MNQ trades"))
+                    "latency_logger.hpp uses NQ_TICK_VALUE ($5.00) for slippage_usd — "
+                    "should use MNQ_TICK_VALUE ($0.50) — 10x inflated for MNQ trades"))
             else:
                 findings.append(_warn("latency_logger_uses_mnq",
                     f"latency_logger.hpp slippage_usd uses '{used_const}' — verify this is correct for MNQ"))
@@ -129,7 +129,7 @@ def check_symbol_consistency() -> list[dict]:
     findings = []
 
     if not CONFIG_PATH.exists():
-        return [_fail("symbol_consistency", f"live_config.json not found")]
+        return [_fail("symbol_consistency", "live_config.json not found")]
 
     with open(CONFIG_PATH) as f:
         cfg = json.load(f)
@@ -138,7 +138,7 @@ def check_symbol_consistency() -> list[dict]:
 
     if not ORB_CONFIG_HPP.exists():
         findings.append(_info("symbol_consistency",
-            f"Cannot check C++ symbol default — orb_config.hpp missing"))
+            "Cannot check C++ symbol default — orb_config.hpp missing"))
         return findings
 
     content = ORB_CONFIG_HPP.read_text()
@@ -147,7 +147,7 @@ def check_symbol_consistency() -> list[dict]:
 
     if cpp_symbol is None:
         findings.append(_info("symbol_consistency",
-            f"C++ OrbConfig::symbol default not found — runtime config overrides apply"))
+            "C++ OrbConfig::symbol default not found — runtime config overrides apply"))
     elif py_symbol == cpp_symbol:
         findings.append(_pass("symbol_consistency",
             f"Symbol match: live_config={py_symbol}, C++ default={cpp_symbol}"))
@@ -164,7 +164,7 @@ def check_python_point_value_default() -> list[dict]:
     """Check 4: live_trader.py point_value fallback default."""
     findings = []
     if not LIVE_TRADER_PY.exists():
-        return [_fail("python_point_value_default", f"live_trader.py not found")]
+        return [_fail("python_point_value_default", "live_trader.py not found")]
 
     content = LIVE_TRADER_PY.read_text()
     # Find all get("point_value", <default>) patterns
@@ -251,9 +251,9 @@ def check_trade_route() -> list[dict]:
     route = cfg.get("trade_route", "")
     if route == "simulator":
         findings.append(_fail("trade_route_not_simulator",
-            f"live_config.json trade_route='simulator' — C++ executor will route ALL orders "
-            f"to Rithmic paper simulator even with dry_run=False. "
-            f"Set trade_route='Rithmic Order Routing' for live trading."))
+            "live_config.json trade_route='simulator' — C++ executor will route ALL orders "
+            "to Rithmic paper simulator even with dry_run=False. "
+            "Set trade_route='Rithmic Order Routing' for live trading."))
     elif not route:
         findings.append(_warn("trade_route_not_simulator",
             "live_config.json trade_route is missing — C++ will use default 'Rithmic Order Routing'"))
@@ -344,7 +344,7 @@ def main():
         sys.exit(1 if failed > 0 else 0)
 
     print(f"\n{'='*60}")
-    print(f"  CROSS-SYSTEM AUDIT")
+    print("  CROSS-SYSTEM AUDIT")
     print(f"  {passed} passed, {failed} failed, {warned} warnings, {len(findings)} total")
     print(f"{'='*60}")
 

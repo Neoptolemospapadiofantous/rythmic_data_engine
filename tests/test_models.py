@@ -17,10 +17,9 @@ from __future__ import annotations
 
 import sys
 import unittest
-from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))

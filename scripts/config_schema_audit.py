@@ -47,7 +47,7 @@ def run_audit() -> list[dict]:
 
     if ok:
         findings.append(_result("config_schema", "PASS", "INFO",
-            f"live_config.json passes full Pydantic schema validation"))
+            "live_config.json passes full Pydantic schema validation"))
     else:
         # Parse pydantic error lines into individual findings
         current_field = None
@@ -67,7 +67,7 @@ def run_audit() -> list[dict]:
         if not any(f["status"] == "FAIL" for f in findings):
             # Fallback: just emit the raw error block as one finding
             findings.append(_result("config_schema", "FAIL", "CRITICAL",
-                f"live_config.json schema violations:\n" + "\n".join(errors[:20])))
+                "live_config.json schema violations:\n" + "\n".join(errors[:20])))
 
     return findings
 
@@ -88,7 +88,7 @@ def main() -> int:
         return 1 if failed > 0 else 0
 
     print(f"\n{'='*60}")
-    print(f"  CONFIG SCHEMA AUDIT")
+    print("  CONFIG SCHEMA AUDIT")
     print(f"  {passed} passed, {failed} failed, {warned} warnings, {len(findings)} total")
     print(f"{'='*60}")
 

@@ -219,7 +219,7 @@ def _apply_config_overrides(override_file: Path) -> None:
     if updated:
         print(f"  {GREEN}✓{RESET}  Config overrides applied → {', '.join(updated)}")
     else:
-        print(f"  Config files: no changes needed (already up to date)")
+        print("  Config files: no changes needed (already up to date)")
 
 
 def cmd_verify(name: str, envs: dict) -> None:

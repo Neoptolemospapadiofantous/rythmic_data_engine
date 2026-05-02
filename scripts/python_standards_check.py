@@ -205,7 +205,7 @@ def main():
         sys.exit(1 if errors > 0 else 0)
 
     print(f"\n{'='*60}")
-    print(f"  PYTHON STANDARDS CHECK")
+    print("  PYTHON STANDARDS CHECK")
     print(f"  {passed} passed, {errors} errors, {warns} warnings, {len(findings)} total")
     print(f"{'='*60}")
 

@@ -13,7 +13,6 @@ Usage:
 """
 import argparse
 import json
-import math
 import sys
 from pathlib import Path
 
@@ -389,7 +388,7 @@ def main():
         sys.exit(1 if failed > 0 else 0)
 
     print(f"\n{'='*60}")
-    print(f"  FORMULA AUDIT")
+    print("  FORMULA AUDIT")
     print(f"  {passed} passed, {failed} failed, {warned} warnings, {len(all_findings)} total")
     print(f"{'='*60}")
 

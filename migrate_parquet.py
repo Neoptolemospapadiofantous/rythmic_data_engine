@@ -22,7 +22,6 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -101,8 +100,10 @@ def _prep_df(path: Path) -> "pd.DataFrame | None":
     df["ts_event"] = pd.to_datetime(df["ts_event"], utc=True)
 
     if "aggressor_side" in df.columns:
-        if "side"   not in df.columns: df["side"]   = df["aggressor_side"]
-        if "is_buy" not in df.columns: df["is_buy"] = df["aggressor_side"] == "B"
+        if "side" not in df.columns:
+            df["side"] = df["aggressor_side"]
+        if "is_buy" not in df.columns:
+            df["is_buy"] = df["aggressor_side"] == "B"
 
     for col in ["ts_event", "price", "size", "side", "is_buy"]:
         if col not in df.columns:

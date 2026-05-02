@@ -407,7 +407,7 @@ class TestGateMLChecksum(unittest.TestCase):
     def test_model_exists_checksum_matches_passes(self):
         model = self.tmp / "model.pkl"
         model.write_bytes(b"fake-model")
-        import hashlib, go_live as gl
+        import hashlib
         actual_hash = hashlib.sha256(b"fake-model").hexdigest()
         checksums_path = self.tmp / "checksums.json"
         checksums_path.write_text(json.dumps({str(model): actual_hash}))
@@ -521,7 +521,6 @@ class TestGoLiveCLI(unittest.TestCase):
 
     def test_update_checksums_flag_exits_zero(self):
         """--update-checksums must exit cleanly without running preflight gates."""
-        import go_live
         with tempfile.TemporaryDirectory() as td:
             cfg_path = Path(td) / "config" / "live_config.json"
             cfg_path.parent.mkdir()

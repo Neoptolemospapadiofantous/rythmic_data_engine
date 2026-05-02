@@ -23,7 +23,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -240,7 +239,7 @@ class TestDailyLossLimitHalt(unittest.TestCase):
         except ImportError:
             self.skipTest("strategy.micro_orb not importable")
 
-    def _make_strategy(self, daily_loss_limit: float = 500.0) -> "MicroORBStrategy":
+    def _make_strategy(self, daily_loss_limit: float = 500.0) -> "MicroORBStrategy":  # noqa: F821
         cfg = {
             "dry_run": True,
             "symbol": "NQ",

@@ -33,7 +33,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -243,7 +243,7 @@ def _gate_ml_model(cfg: dict) -> GateResult:
     return GateResult(
         "F. ML model file + checksum",
         False,
-        f"checksum MISMATCH — model may be stale or corrupt",
+        "checksum MISMATCH — model may be stale or corrupt",
     )
 
 

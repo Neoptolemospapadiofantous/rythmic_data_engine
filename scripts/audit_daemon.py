@@ -590,6 +590,67 @@ def run_python_tests() -> dict:
                 "message": f"Error running pytest: {e}", "value": -1}
 
 
+def run_type_check() -> dict:
+    """Run mypy on key Python files — catches type regressions."""
+    targets = ["live_trader.py", "models.py", "go_live.py",
+               "scripts/audit_daemon.py", "strategy/features.py"]
+    existing = [t for t in targets if (ENGINE_DIR / t).exists()]
+    if not existing:
+        return {"check": "type_check", "status": "INFO", "message": "No targets found", "value": 0}
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "mypy", "--ignore-missing-imports",
+             "--disable-error-code=import-untyped",
+             "--no-error-summary", "--no-pretty"] + existing,
+            capture_output=True, text=True, timeout=60,
+            cwd=str(ENGINE_DIR),
+        )
+        lines = [ln for ln in (result.stdout + result.stderr).splitlines()
+                 if ": error:" in ln]
+        if not lines:
+            return {"check": "type_check", "status": "PASS",
+                    "message": f"mypy clean ({len(existing)} files)", "value": 0}
+        return {"check": "type_check", "status": "WARN",
+                "message": f"{len(lines)} type error(s): {lines[0]}", "value": float(len(lines))}
+    except FileNotFoundError:
+        return {"check": "type_check", "status": "INFO",
+                "message": "mypy not installed (pip install mypy)", "value": 0}
+    except subprocess.TimeoutExpired:
+        return {"check": "type_check", "status": "INFO",
+                "message": "mypy timed out after 60s", "value": -1}
+    except Exception as e:
+        return {"check": "type_check", "status": "WARN",
+                "message": f"mypy error: {e}", "value": -1}
+
+
+def run_lint_check() -> dict:
+    """Run ruff on Python sources — catches style and correctness issues."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", ".",
+             "--select=F,E7,E9,W6", "--exclude=build", "--quiet"],
+            capture_output=True, text=True, timeout=30,
+            cwd=str(ENGINE_DIR),
+        )
+        out = result.stdout.strip()
+        if result.returncode == 0:
+            return {"check": "lint_check", "status": "PASS",
+                    "message": "ruff: no issues", "value": 0}
+        lines = [ln for ln in out.splitlines() if ln.strip()]
+        return {"check": "lint_check", "status": "WARN",
+                "message": f"{len(lines)} lint issue(s): {lines[0] if lines else out[:120]}",
+                "value": float(len(lines))}
+    except FileNotFoundError:
+        return {"check": "lint_check", "status": "INFO",
+                "message": "ruff not installed (pip install ruff)", "value": 0}
+    except subprocess.TimeoutExpired:
+        return {"check": "lint_check", "status": "INFO",
+                "message": "ruff timed out after 30s", "value": -1}
+    except Exception as e:
+        return {"check": "lint_check", "status": "WARN",
+                "message": f"ruff error: {e}", "value": -1}
+
+
 def check_trading_constants(live_cfg: dict | None) -> dict:
     """Verify trading constants match MNQ spec and prop firm constraints.
 
@@ -901,6 +962,12 @@ def run_all_checks(conn, live_cfg: dict | None) -> list[dict]:
 
     log("Running Python tests...")
     results.append(run_python_tests())
+
+    log("Running type check...")
+    results.append(run_type_check())
+
+    log("Running lint check...")
+    results.append(run_lint_check())
 
     return results
 

@@ -372,7 +372,7 @@ def main() -> int:
         # 5. Start live_trader — record log position BEFORE launch so startup
         #    lines (including replay trade_open) are not missed by the watcher
         log_start_pos = LOG_PATH.stat().st_size if LOG_PATH.exists() else 0
-        proc = start_live_trader()
+        _proc = start_live_trader()
         time.sleep(2)  # let it initialize
 
         # ── demo mode: reach WATCHING and hold for --fire ─────────────────────
@@ -380,7 +380,7 @@ def main() -> int:
             log("=" * 60, CYAN)
             log("DEMO — ORB bars injected. Strategy should be in WATCHING state.", CYAN)
             log(f"  ORB {orb_low}–{orb_high} | Check http://localhost:3000/live", CYAN)
-            log(f"  Run with --fire to inject the breakout bar and trigger the trade.", CYAN)
+            log("  Run with --fire to inject the breakout bar and trigger the trade.", CYAN)
             log("=" * 60, CYAN)
             log("live_trader running. Press Ctrl+C when done.", YELLOW)
             try:

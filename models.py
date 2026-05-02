@@ -18,10 +18,14 @@ Usage:
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, asdict
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
+
+# Alias avoids mypy "not valid as a type" when 'date' field in SessionSummary
+# shadows the datetime.date type inside class-scoped method signatures.
+_Date = date
 
 import psycopg2
 import psycopg2.extras
@@ -324,7 +328,7 @@ class SessionSummary:
     def write_crash_safe(
         cls,
         conn: psycopg2.extensions.connection,
-        session_date: date,
+        session_date: _Date,
         trades: Optional[list] = None,
         source: str = "python",
         start_equity: Optional[float] = None,
@@ -385,7 +389,7 @@ class SessionSummary:
 
     @classmethod
     def for_date(cls, conn: psycopg2.extensions.connection,
-                 session_date: date) -> list[SessionSummary]:
+                 session_date: _Date) -> list[SessionSummary]:
         """Return all session summaries for a given date (may be >1 if cpp+python)."""
         with conn.cursor() as cur:
             cur.execute("""
