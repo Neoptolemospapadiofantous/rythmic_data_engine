@@ -124,8 +124,8 @@ def _send_alert(config: dict, message: str) -> None:
         payload = json.dumps({"text": message}).encode()
         req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=8)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("live_trader").warning("alert delivery failed: %s", exc)
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
@@ -473,6 +473,19 @@ class LiveTrader:
                                        self._dry_run, reason)
         except Exception as exc:
             self._log.error("emergency_flatten error: %s", exc)
+            _send_alert(self._config,
+                        f":octagonal_sign: *live_trader* emergency_flatten FAILED: {exc}. "
+                        f"Manual position check required.")
+            halt = Path("data/AUDIT_HALT")
+            try:
+                halt.parent.mkdir(parents=True, exist_ok=True)
+                halt.write_text(json.dumps({
+                    "check": "emergency_flatten",
+                    "message": f"emergency_flatten failed: {exc}",
+                    "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                }))
+            except Exception:
+                pass
 
     # ── startup ───────────────────────────────────────────────────────
 
@@ -543,14 +556,30 @@ class LiveTrader:
         self._log.info("replay complete: strategy_state=%s orb_high=%s orb_low=%s",
                        self._strategy.state.name, self._strategy.orb_high, self._strategy.orb_low)
 
+    _MAX_RECONNECT_FAILURES = 10
+
     def _bar_loop(self) -> None:
         try:
             bar = _poll_latest_bar(self._conn, self._symbol, self._last_bar_ts)
         except psycopg2.OperationalError as exc:
-            self._log.warning("PG bar poll error: %s — reconnecting", exc)
+            self._reconnect_failures += 1
+            self._log.warning("PG bar poll error (%d/%d): %s — reconnecting",
+                              self._reconnect_failures, self._MAX_RECONNECT_FAILURES, exc)
+            if self._reconnect_failures >= self._MAX_RECONNECT_FAILURES:
+                self._log.critical(
+                    "max reconnect failures (%d) reached — writing NO_DEPLOY and halting",
+                    self._MAX_RECONNECT_FAILURES)
+                _send_alert(self._config,
+                            f":octagonal_sign: *live_trader* halted after "
+                            f"{self._MAX_RECONNECT_FAILURES} consecutive DB reconnect failures")
+                no_deploy = Path(self._config.get("no_deploy_path", "NO_DEPLOY"))
+                no_deploy.touch()
+                self._running = False
+                return
             self._conn = _pg_connect_with_retry(self._config, self._log)
             return
 
+        self._reconnect_failures = 0  # successful poll resets counter
         if bar is None:
             return
         if self._last_bar_ts and bar["ts"] <= self._last_bar_ts:

@@ -99,8 +99,8 @@ def _send_alert(message: str) -> None:
         req = urllib.request.Request(url, data=payload,
                                      headers={"Content-Type": "application/json"})
         urllib.request.urlopen(req, timeout=8)
-    except Exception:
-        pass
+    except Exception as exc:
+        log(f"alert delivery failed: {exc}", "WARN")
 
 
 # ── Logging + DB helpers ───────────────────────────────────────────
@@ -568,11 +568,12 @@ def run_python_tests() -> dict:
 
 
 def check_trading_constants(live_cfg: dict | None) -> dict:
-    """Verify point_value, tick_value, symbol, commission_rt match MNQ spec.
+    """Verify trading constants match MNQ spec and prop firm constraints.
 
     Mismatches are CRITICAL with native_critical=True — a wrong point_value
     silently scales every PnL calculation by 10x.
     Missing (None) values are WARN — incomplete config, not a wrong value.
+    Also checks: sl_points > 0, trail_step > 0, qty within prop firm limit.
     """
     if live_cfg is None:
         return {"check": "trading_constants", "status": "WARN",
@@ -585,6 +586,10 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
     tv = live_cfg.get("tick_value")
     sym = live_cfg.get("symbol", "")
     comm = live_cfg.get("commission_rt")
+    sl_pts = live_cfg.get("sl_points")
+    trail = live_cfg.get("trail_step")
+    qty = live_cfg.get("qty")
+    max_pos = live_cfg.get("prop_firm", {}).get("max_position_size", 3)
 
     if pv is None:
         warnings.append("point_value not set")
@@ -601,6 +606,23 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
     if comm is not None and abs(float(comm) - 4.0) > 0.01:
         errors.append(f"commission_rt={comm} (expected 4.0)")
 
+    if sl_pts is None:
+        warnings.append("sl_points not set")
+    elif float(sl_pts) <= 0:
+        errors.append(f"sl_points={sl_pts} must be > 0")
+
+    if trail is None:
+        warnings.append("trail_step not set")
+    elif float(trail) <= 0:
+        errors.append(f"trail_step={trail} must be > 0")
+
+    if qty is None:
+        warnings.append("qty not set")
+    elif int(qty) <= 0:
+        errors.append(f"qty={qty} must be > 0")
+    elif int(qty) > int(max_pos):
+        errors.append(f"qty={qty} exceeds prop_firm.max_position_size={max_pos}")
+
     if errors:
         return {"check": "trading_constants", "status": "CRITICAL",
                 "native_critical": True,
@@ -608,10 +630,12 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
                 "value": float(len(errors))}
     if warnings:
         return {"check": "trading_constants", "status": "WARN",
-                "message": "Missing: " + "; ".join(warnings),
+                "message": "Missing constants: " + "; ".join(warnings),
                 "value": float(len(warnings))}
     return {"check": "trading_constants", "status": "PASS",
-            "message": f"point_value={pv} tick_value={tv} symbol={sym!r} commission_rt={comm}",
+            "message": (f"point_value={pv} tick_value={tv} symbol={sym!r} "
+                        f"commission_rt={comm} sl_points={sl_pts} "
+                        f"trail_step={trail} qty={qty}"),
             "value": 0.0}
 
 
@@ -711,6 +735,85 @@ def check_slippage_sanity(conn) -> dict:
             "value": worse}
 
 
+def check_trade_table_consistency(conn) -> dict:
+    """Detect duplicate open positions across Python trades and C++ live_trades tables.
+
+    A trade open in both tables simultaneously means reconciliation failed at
+    startup or an edge-case crash recovery scenario — requires manual intervention.
+    """
+    from datetime import date
+    today = date.today()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) FROM trades
+            WHERE session_date = %s AND exit_time IS NULL AND source = 'python'
+        """, (today,))
+        py_open = cur.fetchone()[0] or 0
+    except Exception as e:
+        return {"check": "trade_table_consistency", "status": "WARN",
+                "message": f"trades query error: {e}", "value": -1}
+    try:
+        cur.execute("""
+            SELECT COUNT(*) FROM live_trades
+            WHERE trade_date = %s AND exit_time IS NULL
+        """, (today,))
+        cpp_open = cur.fetchone()[0] or 0
+    except Exception:
+        conn.rollback()
+        cpp_open = 0  # live_trades may not exist in all environments
+
+    if py_open > 0 and cpp_open > 0:
+        return {"check": "trade_table_consistency", "status": "FAIL",
+                "message": (f"DUPLICATE OPEN POSITION: {py_open} in trades "
+                            f"AND {cpp_open} in live_trades for {today}. "
+                            "Manual intervention required."),
+                "value": float(py_open + cpp_open)}
+
+    if py_open > 1:
+        return {"check": "trade_table_consistency", "status": "WARN",
+                "message": f"{py_open} open trades records in trades table for {today}",
+                "value": float(py_open)}
+
+    if cpp_open > 1:
+        return {"check": "trade_table_consistency", "status": "WARN",
+                "message": f"{cpp_open} open trade records in live_trades for {today}",
+                "value": float(cpp_open)}
+
+    return {"check": "trade_table_consistency", "status": "PASS",
+            "message": (f"trades open={py_open} live_trades open={cpp_open} "
+                        f"for {today} — consistent"),
+            "value": 0.0}
+
+
+def check_config_schema(live_cfg: dict | None) -> dict:
+    """Run Pydantic schema validation on live_config.json every audit cycle.
+
+    Catches config drift early — e.g. a field set to a wrong type, a required
+    field removed, or a constraint violated.  Non-blocking (WARN not CRITICAL)
+    since a schema mismatch alone doesn't stop trading.
+    """
+    if live_cfg is None:
+        return {"check": "config_schema", "status": "WARN",
+                "message": "live_config.json not loaded — cannot validate schema",
+                "value": -1}
+    try:
+        sys.path.insert(0, str(ENGINE_DIR))
+        from scripts.use_env import LiveConfig  # type: ignore[import]
+        LiveConfig.model_validate(live_cfg)
+        return {"check": "config_schema", "status": "PASS",
+                "message": "live_config.json passes Pydantic schema validation",
+                "value": 0.0}
+    except ImportError:
+        return {"check": "config_schema", "status": "INFO",
+                "message": "LiveConfig not importable — schema check skipped",
+                "value": 0.0}
+    except Exception as e:
+        return {"check": "config_schema", "status": "WARN",
+                "message": f"Schema validation failed: {e}",
+                "value": 1.0}
+
+
 # ── Main loop ──────────────────────────────────────────────────────
 
 def run_all_checks(conn, live_cfg: dict | None) -> list[dict]:
@@ -755,6 +858,12 @@ def run_all_checks(conn, live_cfg: dict | None) -> list[dict]:
     log("Checking slippage sanity...")
     results.append(check_slippage_sanity(conn))
 
+    log("Checking trade table consistency...")
+    results.append(check_trade_table_consistency(conn))
+
+    log("Checking config schema...")
+    results.append(check_config_schema(live_cfg))
+
     log("Running contamination audit...")
     results.append(run_contamination_audit())
 
@@ -775,6 +884,10 @@ def main():
     args = parser.parse_args()
 
     _load_env()
+
+    # Ensure runtime directories exist before any check tries to write to them
+    for d in [LOG_DIR, ENGINE_DIR / "data" / "alerts"]:
+        d.mkdir(parents=True, exist_ok=True)
 
     log("=" * 60)
     log("  RITHMIC ENGINE AUDIT DAEMON STARTED")

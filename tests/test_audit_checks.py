@@ -36,6 +36,7 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import audit_daemon
 from audit_daemon import (
     EscalationEngine,
+    check_config_schema,
     check_data_freshness,
     check_disk_space,
     check_drift_halt,
@@ -43,6 +44,7 @@ from audit_daemon import (
     check_pnl_sanity,
     check_ram_usage,
     check_slippage_sanity,
+    check_trade_table_consistency,
     check_trading_constants,
     check_wal_health,
 )
@@ -71,10 +73,16 @@ def escalation_engine(tmp_path, monkeypatch):
 
 # ── check_trading_constants ────────────────────────────────────────────────────
 
+_CONSTANTS_PASS_CFG = {
+    "point_value": 2.0, "tick_value": 0.50, "symbol": "MNQ", "commission_rt": 4.0,
+    "sl_points": 15.0, "trail_step": 10.0, "qty": 1,
+    "prop_firm": {"max_position_size": 3},
+}
+
+
 @pytest.mark.fast
 def test_trading_constants_pass():
-    cfg = {"point_value": 2.0, "tick_value": 0.50, "symbol": "MNQ", "commission_rt": 4.0}
-    r = check_trading_constants(cfg)
+    r = check_trading_constants(_CONSTANTS_PASS_CFG)
     assert r["check"] == "trading_constants"
     assert r["status"] == "PASS"
     assert r["value"] == pytest.approx(0.0)
@@ -83,7 +91,7 @@ def test_trading_constants_pass():
 @pytest.mark.fast
 def test_trading_constants_warn_missing_tick_value():
     """None tick_value → WARN (missing field ≠ wrong value)."""
-    cfg = {"point_value": 2.0, "tick_value": None, "symbol": "MNQ", "commission_rt": 4.0}
+    cfg = {**_CONSTANTS_PASS_CFG, "tick_value": None}
     r = check_trading_constants(cfg)
     assert r["status"] == "WARN"
     assert r.get("native_critical") is not True
@@ -92,7 +100,7 @@ def test_trading_constants_warn_missing_tick_value():
 
 @pytest.mark.fast
 def test_trading_constants_warn_missing_both():
-    cfg = {"point_value": None, "tick_value": None, "symbol": "MNQ", "commission_rt": 4.0}
+    cfg = {**_CONSTANTS_PASS_CFG, "point_value": None, "tick_value": None}
     r = check_trading_constants(cfg)
     assert r["status"] == "WARN"
     assert "Missing" in r["message"]
@@ -101,7 +109,7 @@ def test_trading_constants_warn_missing_both():
 @pytest.mark.fast
 def test_trading_constants_critical_wrong_point_value():
     """NQ point_value (20.0) → CRITICAL with native_critical=True."""
-    cfg = {"point_value": 20.0, "tick_value": 0.50, "symbol": "MNQ", "commission_rt": 4.0}
+    cfg = {**_CONSTANTS_PASS_CFG, "point_value": 20.0}
     r = check_trading_constants(cfg)
     assert r["status"] == "CRITICAL"
     assert r.get("native_critical") is True
@@ -111,7 +119,7 @@ def test_trading_constants_critical_wrong_point_value():
 @pytest.mark.fast
 def test_trading_constants_critical_wrong_tick_value():
     """NQ tick_value (5.0) → CRITICAL with native_critical=True."""
-    cfg = {"point_value": 2.0, "tick_value": 5.0, "symbol": "MNQ", "commission_rt": 4.0}
+    cfg = {**_CONSTANTS_PASS_CFG, "tick_value": 5.0}
     r = check_trading_constants(cfg)
     assert r["status"] == "CRITICAL"
     assert r.get("native_critical") is True
@@ -120,10 +128,43 @@ def test_trading_constants_critical_wrong_tick_value():
 
 @pytest.mark.fast
 def test_trading_constants_critical_wrong_commission():
-    cfg = {"point_value": 2.0, "tick_value": 0.50, "symbol": "MNQ", "commission_rt": 8.0}
+    cfg = {**_CONSTANTS_PASS_CFG, "commission_rt": 8.0}
     r = check_trading_constants(cfg)
     assert r["status"] == "CRITICAL"
     assert r.get("native_critical") is True
+
+
+@pytest.mark.fast
+def test_trading_constants_warn_missing_sl_points():
+    cfg = {**_CONSTANTS_PASS_CFG, "sl_points": None}
+    r = check_trading_constants(cfg)
+    assert r["status"] == "WARN"
+    assert "sl_points" in r["message"]
+
+
+@pytest.mark.fast
+def test_trading_constants_critical_sl_points_zero():
+    cfg = {**_CONSTANTS_PASS_CFG, "sl_points": 0.0}
+    r = check_trading_constants(cfg)
+    assert r["status"] == "CRITICAL"
+    assert r.get("native_critical") is True
+
+
+@pytest.mark.fast
+def test_trading_constants_critical_qty_exceeds_prop_limit():
+    cfg = {**_CONSTANTS_PASS_CFG, "qty": 5, "prop_firm": {"max_position_size": 3}}
+    r = check_trading_constants(cfg)
+    assert r["status"] == "CRITICAL"
+    assert r.get("native_critical") is True
+    assert "qty" in r["message"]
+
+
+@pytest.mark.fast
+def test_trading_constants_warn_missing_qty():
+    cfg = {k: v for k, v in _CONSTANTS_PASS_CFG.items() if k != "qty"}
+    r = check_trading_constants(cfg)
+    assert r["status"] == "WARN"
+    assert "qty" in r["message"]
 
 
 @pytest.mark.fast
@@ -336,6 +377,79 @@ def test_slippage_sanity_excessive_entry():
     r = check_slippage_sanity(_mock_conn(fetchone_value=(6.5, 2.0, 5)))
     assert r["status"] == "WARN"
     assert r["value"] == pytest.approx(6.5)
+
+
+# ── check_trade_table_consistency ────────────────────────────────────────────
+
+
+@pytest.mark.fast
+def test_trade_table_consistency_pass_both_zero():
+    """No open trades in either table → PASS."""
+    conn = _mock_conn(fetchone_value=(0,))
+    r = check_trade_table_consistency(conn)
+    assert r["check"] == "trade_table_consistency"
+    assert r["status"] == "PASS"
+
+
+@pytest.mark.fast
+def test_trade_table_consistency_fail_duplicate():
+    """Open in both tables → FAIL (requires manual intervention)."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.side_effect = [(1,), (1,)]
+    conn.cursor.return_value = cur
+    r = check_trade_table_consistency(conn)
+    assert r["status"] == "FAIL"
+    assert "DUPLICATE" in r["message"]
+
+
+@pytest.mark.fast
+def test_trade_table_consistency_warn_multiple_python():
+    """Multiple open Python trades (bug state) → WARN."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.side_effect = [(2,), (0,)]
+    conn.cursor.return_value = cur
+    r = check_trade_table_consistency(conn)
+    assert r["status"] == "WARN"
+
+
+@pytest.mark.fast
+def test_trade_table_consistency_cpp_table_missing():
+    """live_trades table doesn't exist → still PASS for Python side."""
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.side_effect = [(0,), Exception("relation does not exist")]
+    conn.cursor.return_value = cur
+    r = check_trade_table_consistency(conn)
+    assert r["status"] == "PASS"
+
+
+# ── check_config_schema ───────────────────────────────────────────────────────
+
+
+@pytest.mark.fast
+def test_config_schema_none_config():
+    """No config → WARN."""
+    r = check_config_schema(None)
+    assert r["check"] == "config_schema"
+    assert r["status"] == "WARN"
+
+
+@pytest.mark.fast
+def test_config_schema_import_error(monkeypatch):
+    """If LiveConfig not importable → INFO (non-fatal)."""
+    import builtins
+    original_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if "use_env" in name:
+            raise ImportError("mocked")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", mock_import)
+    r = check_config_schema({"any": "cfg"})
+    assert r["status"] == "INFO"
 
 
 # ── check_data_freshness ──────────────────────────────────────────────────────
