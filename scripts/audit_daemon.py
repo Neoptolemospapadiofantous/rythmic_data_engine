@@ -3,7 +3,8 @@
 Continuous Audit Daemon for rithmic_engine.
 
 Runs data health checks in a loop, enforces escalation rules, fires Slack
-alerts, and writes quality metrics to PostgreSQL.
+alerts, and writes quality metrics to PostgreSQL.  Escalation state is
+persisted to disk so daemon restarts never silently amnesty an open incident.
 
 Escalation policy (from quality_rules/escalation.yaml):
   3 WARNs from same check in 60 min  →  escalate to ERROR, alert once
@@ -12,16 +13,22 @@ Escalation policy (from quality_rules/escalation.yaml):
   2 consecutive clean passes          →  auto-resolve, alert once
 
 Checks each cycle:
-  1. data_freshness         — last tick within expected recency
-  2. rejection_rate         — percentage of ticks rejected
-  3. gap_count              — timestamp gaps during RTH
-  4. session_health         — current session stats
-  5. wal_health             — WAL file size (unflushed data)
-  6. disk_space             — free disk space
-  7. contamination_audit    — runs contamination_audit.py
-  8. cpp_tests              — runs ctest
-  9. trading_constants      — point_value, tick_value, symbol, commission_rt
-  10. pnl_sanity            — recent trades within expected PnL range
+  1.  data_freshness         — last tick recency (72h grace on weekends)
+  2.  rejection_rate         — percentage of ticks rejected by validator
+  3.  gap_count              — timestamp gaps in recent data
+  4.  session_health         — latest session row stats
+  5.  wal_health             — WAL file size vs 1 MB threshold
+  6.  disk_space             — free disk vs 5 GB floor
+  7.  contamination_audit    — runs contamination_audit.py --json
+  8.  cpp_tests              — runs ctest (INFO on timeout, not WARN)
+  9.  trading_constants      — point_value, tick_value, symbol, commission_rt
+  10. pnl_sanity             — |pnl_usd| > $500 in live_trades last 24h
+  11. ram_usage              — system RAM % used
+  12. process_liveness       — nq_executor / live_trader running during RTH
+  13. model_staleness        — ML model file age vs 30-day threshold
+  14. drift_halt             — data/DRIFT_HALT sentinel present
+  15. slippage_sanity        — avg fill slippage vs 6-tick threshold (7d)
+  16. python_tests           — pytest tests/ suite (regression gate)
 
 Usage:
   python scripts/audit_daemon.py                 # Run forever, check every 5 min
@@ -31,6 +38,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +52,10 @@ LOG_FILE = LOG_DIR / "audit_daemon.log"
 FAIL_FILE = LOG_DIR / "audit_failures.log"
 STATUS_FILE = ENGINE_DIR / "data" / "audit_status.json"
 AUDIT_HALT = ENGINE_DIR / "data" / "AUDIT_HALT"
+ESCALATION_STATE_FILE = ENGINE_DIR / "data" / "escalation_state.json"
 
+
+# ── Environment + config ───────────────────────────────────────────
 
 def _load_env():
     env_file = ENGINE_DIR / ".env"
@@ -92,6 +103,8 @@ def _send_alert(message: str) -> None:
         pass
 
 
+# ── Logging + DB helpers ───────────────────────────────────────────
+
 def log(msg: str, level: str = "INFO"):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{level}] {msg}"
@@ -136,32 +149,61 @@ def write_event(conn, severity: str, event: str, details: str = ""):
 class EscalationEngine:
     """Enforces quality_rules/escalation.yaml policy at runtime.
 
-    Tracks per-check WARN history and ERROR age in memory. Fires alerts
-    exactly once per transition (no alert storms). Auto-resolves after
-    two consecutive fully-clean cycles.
+    State (warn timestamps, error ages, alerted keys) is persisted to
+    ESCALATION_STATE_FILE after every cycle so a daemon restart never
+    silently amnesty an open incident.
     """
 
-    WARN_WINDOW_SEC = 3600    # 60-min WARN accumulation window
-    WARN_THRESHOLD = 3        # WARNs needed to escalate to ERROR
-    ERROR_CRITICAL_SEC = 1800 # 30 min unresolved ERROR → CRITICAL
-    CLEAN_RESOLVE = 2         # consecutive clean passes to auto-resolve
+    WARN_WINDOW_SEC = 3600     # 60-min WARN accumulation window
+    WARN_THRESHOLD = 3         # WARNs in window needed to escalate to ERROR
+    ERROR_CRITICAL_SEC = 1800  # 30 min unresolved ERROR → CRITICAL
+    CLEAN_RESOLVE = 2          # consecutive clean passes to auto-resolve
 
-    # Checks that are exempt from WARN accumulation and ERROR aging.
-    # INFO results are always exempt; these additional checks produce WARNs
-    # that reflect environmental state (e.g. ctest slow on this host) rather
-    # than real regressions, so we never escalate them.
-    ESCALATION_EXEMPT = {"cpp_tests"}
-
-    # Only native_critical=True results in these checks write AUDIT_HALT.
-    # Escalation-promoted CRITICALs (WARN→ERROR→CRITICAL) do NOT write the sentinel
-    # because they represent repeated soft failures, not hard value mismatches.
+    # Only native_critical=True results in HALT_CHECKS write AUDIT_HALT.
+    # Checks that were escalated WARN→ERROR→CRITICAL do NOT write the sentinel.
     HALT_CHECKS = {"trading_constants"}
 
-    def __init__(self):
+    def __init__(self, state_file: Path = ESCALATION_STATE_FILE):
+        self._state_file = state_file
         self._warn_ts: dict[str, list[float]] = {}
         self._error_since: dict[str, float] = {}
         self._alerted: set[str] = set()
         self._consecutive_clean: int = 0
+        self._load_state()
+
+    def _load_state(self) -> None:
+        try:
+            data = json.loads(self._state_file.read_text())
+            self._warn_ts = {k: [float(t) for t in v]
+                             for k, v in data.get("warn_ts", {}).items()}
+            self._error_since = {k: float(v)
+                                 for k, v in data.get("error_since", {}).items()}
+            self._alerted = set(data.get("alerted", []))
+            self._consecutive_clean = int(data.get("consecutive_clean", 0))
+            if self._error_since:
+                log(f"Escalation state loaded — {len(self._error_since)} active error(s): "
+                    f"{list(self._error_since)}")
+        except FileNotFoundError:
+            pass  # clean first run
+        except Exception as e:
+            log(f"Escalation state load failed (starting fresh): {e}", "WARN")
+
+    def _save_state(self) -> None:
+        try:
+            data = {
+                "warn_ts": self._warn_ts,
+                "error_since": self._error_since,
+                "alerted": list(self._alerted),
+                "consecutive_clean": self._consecutive_clean,
+                "saved_at": time.time(),
+            }
+            self._state_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = str(self._state_file) + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, self._state_file)
+        except Exception as e:
+            log(f"Escalation state save failed: {e}", "WARN")
 
     def process(self, results: list[dict], conn) -> list[dict]:
         now = time.time()
@@ -173,8 +215,8 @@ class EscalationEngine:
             check = r["check"]
             status = r["status"]
 
-            # INFO results and exempt checks never accumulate or age
-            if status == "INFO" or check in self.ESCALATION_EXEMPT:
+            # INFO results never accumulate toward escalation
+            if status == "INFO":
                 escalated.append(r)
                 continue
 
@@ -221,21 +263,22 @@ class EscalationEngine:
                             write_event(conn, "CRITICAL", "audit_critical",
                                         f"{check}: {r['message']}")
 
-                    # Write AUDIT_HALT only for checks that returned CRITICAL natively
-                    # (actual value mismatch), not for checks escalated there via WARN aging.
-                    if check in self.HALT_CHECKS and r.get("native_critical") and not AUDIT_HALT.exists():
+                    # AUDIT_HALT only for native_critical — actual value mismatch,
+                    # not a check that was slowly promoted via WARN accumulation.
+                    if (check in self.HALT_CHECKS
+                            and r.get("native_critical")
+                            and not AUDIT_HALT.exists()):
                         AUDIT_HALT.parent.mkdir(parents=True, exist_ok=True)
-                        AUDIT_HALT.write_text(
-                            json.dumps({
-                                "check": check,
-                                "message": r["message"],
-                                "timestamp": datetime.now(timezone.utc).isoformat(),
-                            }))
+                        AUDIT_HALT.write_text(json.dumps({
+                            "check": check,
+                            "message": r["message"],
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }))
                         log(f"AUDIT_HALT written for {check}", "CRITICAL")
                         _send_alert(
                             f":octagonal_sign: *AUDIT_HALT written* — `{check}` CRITICAL. "
-                            f"live_trader will refuse to start until resolved and "
-                            f"data/AUDIT_HALT is removed.")
+                            f"live_trader will refuse to start. Remove data/AUDIT_HALT "
+                            f"after resolving the issue.")
 
             escalated.append(r)
 
@@ -243,14 +286,14 @@ class EscalationEngine:
         if not any_bad:
             self._consecutive_clean += 1
             if self._consecutive_clean >= self.CLEAN_RESOLVE and self._error_since:
-                resolved = list(self._error_since.keys())
-                for check in resolved:
+                for check in list(self._error_since):
                     _send_alert(
                         f":white_check_mark: *AUDIT RESOLVED* `{check}` "
                         f"cleared after {self.CLEAN_RESOLVE} clean passes")
                     if conn:
                         write_event(conn, "INFO", "audit_resolved",
-                                    f"{check}: auto-resolved after {self.CLEAN_RESOLVE} clean passes")
+                                    f"{check}: auto-resolved after "
+                                    f"{self.CLEAN_RESOLVE} clean passes")
                 self._error_since.clear()
                 self._warn_ts.clear()
                 self._alerted.clear()
@@ -258,12 +301,14 @@ class EscalationEngine:
         else:
             self._consecutive_clean = 0
 
+        self._save_state()
         return escalated
 
 
 # ── Individual checks ──────────────────────────────────────────────
 
 def check_data_freshness(conn) -> dict:
+    """Last tick recency — weekend threshold 72h, RTH 5 min, off-hours 18h."""
     cur = conn.cursor()
     cur.execute("SELECT MAX(ts_event) FROM ticks")
     row = cur.fetchone()
@@ -278,18 +323,18 @@ def check_data_freshness(conn) -> dict:
         latest = latest.replace(tzinfo=pytz.UTC)
     now_utc = datetime.now(tz.utc)
     age_sec = (now_utc - latest).total_seconds()
-    weekday = now_utc.weekday()  # 5=Sat 6=Sun
+    weekday = now_utc.weekday()   # 5=Sat 6=Sun
     hour_utc = now_utc.hour
 
-    if weekday >= 5:                   # weekend — markets closed, 72h grace
+    if weekday >= 5:               # weekend — no trading, 72h grace
         threshold = 259200
-    elif 13 <= hour_utc <= 21:         # weekday RTH (≈ 09:30–16:00 ET)
+    elif 13 <= hour_utc <= 21:     # weekday RTH (≈ 09:30–16:00 ET)
         threshold = 300
-    else:                              # weekday off-hours
-        threshold = 64800              # 18 h
+    else:                          # weekday off-hours
+        threshold = 64800          # 18 h
 
-    ok = age_sec < threshold
-    return {"check": "data_freshness", "status": "PASS" if ok else "WARN",
+    return {"check": "data_freshness",
+            "status": "PASS" if age_sec < threshold else "WARN",
             "message": f"Last tick {age_sec:.0f}s ago ({latest})",
             "value": age_sec}
 
@@ -368,6 +413,67 @@ def check_disk_space() -> dict:
             "message": f"{free_gb:.1f} GB free", "value": free_gb}
 
 
+def check_ram_usage() -> dict:
+    """System RAM % used — warn above 90%.  Uses /proc/meminfo (no psutil dep)."""
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        pct = mem.percent
+        free_gb = mem.available / 1024 ** 3
+    except ImportError:
+        try:
+            info: dict[str, int] = {}
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                k, v = line.split(":", 1)
+                info[k.strip()] = int(v.strip().split()[0])  # kB
+            total = info.get("MemTotal", 0)
+            avail = info.get("MemAvailable", 0)
+            pct = (1 - avail / total) * 100 if total else 0.0
+            free_gb = avail / (1024 ** 2)  # kB → GB
+        except Exception as e:
+            return {"check": "ram_usage", "status": "INFO",
+                    "message": f"Cannot read RAM: {e}", "value": -1}
+    return {"check": "ram_usage",
+            "status": "PASS" if pct < 90.0 else "WARN",
+            "message": f"RAM {pct:.1f}% used ({free_gb:.1f} GB free)",
+            "value": pct}
+
+
+def check_process_liveness() -> dict:
+    """Check whether trading processes are alive during RTH.
+
+    Outside RTH (including weekends) the check is INFO — processes are not
+    expected to be running.  During RTH a missing process is a WARN.
+    """
+    now_utc = datetime.now(timezone.utc)
+    in_rth = now_utc.weekday() < 5 and 13 <= now_utc.hour <= 21
+
+    procs: dict[str, bool] = {}
+    for name, pattern in [("nq_executor", "nq_executor"),
+                           ("live_trader", "live_trader.py")]:
+        r = subprocess.run(["pgrep", "-f", pattern],
+                           capture_output=True, text=True)
+        procs[name] = r.returncode == 0 and bool(r.stdout.strip())
+
+    running = [k for k, v in procs.items() if v]
+    stopped = [k for k, v in procs.items() if not v]
+
+    if not in_rth:
+        return {"check": "process_liveness", "status": "INFO",
+                "message": ("Outside RTH — "
+                            + (", ".join(running) + " running"
+                               if running else "no processes running")),
+                "value": float(len(running))}
+
+    if stopped:
+        return {"check": "process_liveness", "status": "WARN",
+                "message": f"RTH but not running: {', '.join(stopped)}",
+                "value": float(len(running))}
+
+    return {"check": "process_liveness", "status": "PASS",
+            "message": f"Running: {', '.join(running)}", "value": float(len(running))}
+
+
 def run_contamination_audit() -> dict:
     script = ENGINE_DIR / "scripts" / "contamination_audit.py"
     if not script.exists():
@@ -404,7 +510,6 @@ def run_cpp_tests() -> dict:
             ["ctest", "--output-on-failure", "--test-dir", str(build_dir)],
             capture_output=True, text=True, timeout=120,
         )
-        import re
         m = re.search(r"(\d+)% tests passed, (\d+) tests failed out of (\d+)",
                       result.stdout)
         if m:
@@ -419,7 +524,7 @@ def run_cpp_tests() -> dict:
                 "value": float(failed)}
     except subprocess.TimeoutExpired:
         return {"check": "cpp_tests", "status": "INFO",
-                "message": "Timed out after 120s — skipped for escalation", "value": -1}
+                "message": "Timed out after 120s", "value": -1}
     except FileNotFoundError:
         return {"check": "cpp_tests", "status": "INFO",
                 "message": "ctest not found", "value": 0}
@@ -428,11 +533,44 @@ def run_cpp_tests() -> dict:
                 "message": f"Error: {e}", "value": -1}
 
 
+def run_python_tests() -> dict:
+    """Run pytest test suite — catches regressions as they are introduced."""
+    test_dir = ENGINE_DIR / "tests"
+    if not test_dir.exists():
+        return {"check": "python_tests", "status": "INFO",
+                "message": "tests/ directory not found", "value": 0}
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", str(test_dir),
+             "-q", "--tb=line", "--no-header", "-p", "no:warnings"],
+            capture_output=True, text=True, timeout=180,
+            cwd=str(ENGINE_DIR),
+        )
+        out = result.stdout + result.stderr
+        passed = int(m.group(1)) if (m := re.search(r"(\d+) passed", out)) else 0
+        failed = int(m.group(1)) if (m := re.search(r"(\d+) failed", out)) else 0
+        errors = int(m.group(1)) if (m := re.search(r"(\d+) error", out)) else 0
+        total_fail = failed + errors
+        status = "PASS" if total_fail == 0 and passed > 0 else \
+                 "FAIL" if total_fail > 0 else "WARN"
+        return {"check": "python_tests",
+                "status": status,
+                "message": f"{passed} passed, {total_fail} failed",
+                "value": float(total_fail)}
+    except subprocess.TimeoutExpired:
+        return {"check": "python_tests", "status": "INFO",
+                "message": "Timed out after 180s", "value": -1}
+    except Exception as e:
+        return {"check": "python_tests", "status": "WARN",
+                "message": f"Error running pytest: {e}", "value": -1}
+
+
 def check_trading_constants(live_cfg: dict | None) -> dict:
     """Verify point_value, tick_value, symbol, commission_rt match MNQ spec.
 
-    Any mismatch is immediately CRITICAL — a wrong point_value silently
-    scales PnL by 10x, making this the highest-severity check in the daemon.
+    Mismatches are CRITICAL with native_critical=True — a wrong point_value
+    silently scales every PnL calculation by 10x.
+    Missing (None) values are WARN — incomplete config, not a wrong value.
     """
     if live_cfg is None:
         return {"check": "trading_constants", "status": "WARN",
@@ -447,12 +585,12 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
     comm = live_cfg.get("commission_rt")
 
     if pv is None:
-        warnings.append("point_value not set in config")
+        warnings.append("point_value not set")
     elif abs(float(pv) - 2.0) > 0.001:
         errors.append(f"point_value={pv} (must be 2.0 for MNQ)")
 
     if tv is None:
-        warnings.append("tick_value not set in config")
+        warnings.append("tick_value not set")
     elif abs(float(tv) - 0.50) > 0.001:
         errors.append(f"tick_value={tv} (must be 0.50 for MNQ)")
 
@@ -462,15 +600,13 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
         errors.append(f"commission_rt={comm} (expected 4.0)")
 
     if errors:
-        # native_critical=True means the check itself found a wrong value — AUDIT_HALT eligible.
-        # Escalation-promoted CRITICALs (from repeated WARNs) do NOT set this flag.
         return {"check": "trading_constants", "status": "CRITICAL",
                 "native_critical": True,
                 "message": "MISMATCH: " + "; ".join(errors),
                 "value": float(len(errors))}
     if warnings:
         return {"check": "trading_constants", "status": "WARN",
-                "message": "Missing constants: " + "; ".join(warnings),
+                "message": "Missing: " + "; ".join(warnings),
                 "value": float(len(warnings))}
     return {"check": "trading_constants", "status": "PASS",
             "message": f"point_value={pv} tick_value={tv} symbol={sym!r} commission_rt={comm}",
@@ -478,11 +614,7 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
 
 
 def check_pnl_sanity(conn) -> dict:
-    """Flag any trade in the last 24h with |PnL| > $500 (implausible for 1 MNQ contract).
-
-    Rationale: 500 points × $2/point = $1,000. A single trade exceeding $500 PnL
-    on 1 contract suggests a point_value misconfiguration.
-    """
+    """Flag trades in the last 24h with |pnl_usd| > $500 (implausible for 1 MNQ)."""
     try:
         cur = conn.cursor()
         cur.execute("""
@@ -503,6 +635,78 @@ def check_pnl_sanity(conn) -> dict:
                 "value": float(abs(rows[0][1]))}
     return {"check": "pnl_sanity", "status": "PASS",
             "message": "All recent trades within normal PnL range (<$500)", "value": 0.0}
+
+
+def check_model_staleness(live_cfg: dict | None) -> dict:
+    """Flag ML model files older than 30 days."""
+    if live_cfg is None:
+        return {"check": "model_staleness", "status": "INFO",
+                "message": "Config unavailable", "value": -1}
+    ml = live_cfg.get("ml", {})
+    if not ml.get("enabled", False):
+        return {"check": "model_staleness", "status": "INFO",
+                "message": "ML disabled in config", "value": 0}
+    model_path = ENGINE_DIR / ml.get("model_path", "")
+    if not model_path.exists():
+        return {"check": "model_staleness", "status": "WARN",
+                "message": f"Model not found: {model_path.name}", "value": -1}
+    age_days = (time.time() - model_path.stat().st_mtime) / 86400
+    return {"check": "model_staleness",
+            "status": "PASS" if age_days < 30 else "WARN",
+            "message": f"Model {age_days:.0f} days old ({model_path.name})",
+            "value": age_days}
+
+
+def check_drift_halt() -> dict:
+    """Detect data/DRIFT_HALT sentinel — indicates model drift requiring retrain."""
+    halt = ENGINE_DIR / "data" / "DRIFT_HALT"
+    if halt.exists():
+        try:
+            detail = halt.read_text().strip()[:80]
+        except Exception:
+            detail = "(unreadable)"
+        return {"check": "drift_halt", "status": "WARN",
+                "message": f"DRIFT_HALT present — retrain required: {detail}",
+                "value": 1.0}
+    return {"check": "drift_halt", "status": "PASS",
+            "message": "No drift halt", "value": 0.0}
+
+
+def check_slippage_sanity(conn) -> dict:
+    """Avg fill slippage vs 6-tick threshold over the last 7 trading days.
+
+    If avg slippage on either side exceeds 6 ticks, the backtest cost model
+    (4 ticks/side) is materially wrong and the strategy edge calculation is off.
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT AVG(entry_slippage_ticks),
+                   AVG(exit_slippage_ticks),
+                   COUNT(*)
+            FROM live_trades
+            WHERE exit_time > NOW() - INTERVAL '7 days'
+              AND entry_slippage_ticks IS NOT NULL
+              AND exit_slippage_ticks IS NOT NULL
+        """)
+        row = cur.fetchone()
+    except Exception as e:
+        return {"check": "slippage_sanity", "status": "WARN",
+                "message": f"Query error: {e}", "value": -1}
+
+    if row is None or (row[2] or 0) == 0:
+        return {"check": "slippage_sanity", "status": "INFO",
+                "message": "No slippage data in last 7 days", "value": 0}
+
+    avg_entry = float(row[0] or 0)
+    avg_exit = float(row[1] or 0)
+    n = int(row[2])
+    worse = max(avg_entry, avg_exit)
+    return {"check": "slippage_sanity",
+            "status": "PASS" if worse <= 6.0 else "WARN",
+            "message": (f"Avg slippage — entry: {avg_entry:.1f}t "
+                        f"exit: {avg_exit:.1f}t over {n} trades (7d)"),
+            "value": worse}
 
 
 # ── Main loop ──────────────────────────────────────────────────────
@@ -528,17 +732,35 @@ def run_all_checks(conn, live_cfg: dict | None) -> list[dict]:
     log("Checking disk space...")
     results.append(check_disk_space())
 
-    log("Running contamination audit...")
-    results.append(run_contamination_audit())
+    log("Checking RAM usage...")
+    results.append(check_ram_usage())
 
-    log("Running C++ tests...")
-    results.append(run_cpp_tests())
+    log("Checking process liveness...")
+    results.append(check_process_liveness())
 
     log("Checking trading constants...")
     results.append(check_trading_constants(live_cfg))
 
     log("Checking PnL sanity...")
     results.append(check_pnl_sanity(conn))
+
+    log("Checking model staleness...")
+    results.append(check_model_staleness(live_cfg))
+
+    log("Checking drift halt...")
+    results.append(check_drift_halt())
+
+    log("Checking slippage sanity...")
+    results.append(check_slippage_sanity(conn))
+
+    log("Running contamination audit...")
+    results.append(run_contamination_audit())
+
+    log("Running C++ tests...")
+    results.append(run_cpp_tests())
+
+    log("Running Python tests...")
+    results.append(run_python_tests())
 
     return results
 
@@ -581,13 +803,11 @@ def main():
         finally:
             conn.close()
 
-        # Re-connect for escalation writes and metrics
         try:
             conn = _pg_connect()
         except Exception:
             conn = None
 
-        # Apply escalation rules
         results = escalation.process(raw_results, conn)
 
         passed = sum(1 for r in results if r["status"] == "PASS")
@@ -603,7 +823,6 @@ def main():
                 if r["status"] in ("FAIL", "ERROR", "CRITICAL"):
                     log_failure(f"{r['check']}: {r['message']}")
 
-        # Write metrics + audit events
         if conn:
             try:
                 for r in results:
@@ -614,12 +833,12 @@ def main():
                 write_metric(conn, "audit_failed", float(failed), {"run": run_count})
                 write_metric(conn, "audit_consecutive_pass", float(consecutive_pass))
 
-                if failed > 0:
-                    write_event(conn, "ERROR", "audit_failures",
-                                f"{failed} checks failed in run #{run_count}")
-                else:
-                    write_event(conn, "INFO", "audit_pass",
-                                f"All {passed} checks passed (run #{run_count})")
+                severity = "ERROR" if failed > 0 else "INFO"
+                event = "audit_failures" if failed > 0 else "audit_pass"
+                detail = (f"{failed} checks failed in run #{run_count}"
+                          if failed > 0
+                          else f"All {passed} checks passed (run #{run_count})")
+                write_event(conn, severity, event, detail)
 
                 if run_count % 100 == 0:
                     cur = conn.cursor()
@@ -631,7 +850,6 @@ def main():
             finally:
                 conn.close()
 
-        # Atomic status file
         status = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "total_passed": passed,
@@ -659,8 +877,8 @@ def main():
         if args.once:
             sys.exit(1 if failed > 0 else 0)
 
-        # Adaptive interval: after 10 consecutive passes, slow down off-hours work
-        sleep_time = min(args.interval * 2, 600) if consecutive_pass >= 10 else args.interval
+        sleep_time = (min(args.interval * 2, 600)
+                      if consecutive_pass >= 10 else args.interval)
         time.sleep(sleep_time)
 
 
