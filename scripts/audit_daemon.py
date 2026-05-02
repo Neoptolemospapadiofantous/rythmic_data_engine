@@ -35,6 +35,8 @@ Usage:
   python scripts/audit_daemon.py --interval 60   # Check every 60 seconds
   python scripts/audit_daemon.py --once           # Run once and exit
 """
+from __future__ import annotations
+
 import argparse
 import json
 import os
