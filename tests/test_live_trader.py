@@ -648,5 +648,156 @@ class TestLiveConfigSchema(unittest.TestCase):
             self._validate(cfg)
 
 
+# ── EOD flatten path tests ────────────────────────────────────────────────────
+
+@pytest.mark.fast
+class TestEodFlatten(unittest.TestCase):
+
+    def _make_trader_in_position(self, tmpdir: str):
+        """Return a LiveTrader with an open LONG position and a mock DB connection.
+
+        _poll_latest_tick is patched at module level to avoid fetchone ordering
+        issues — it returns a synthetic tick dict on every call.
+        """
+        import live_trader
+        cfg = _make_config(rth_close="09:31:00")  # close almost immediately
+        cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+        cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+        trader = live_trader.LiveTrader(cfg, dry_run=True)
+        trader._session_date = datetime.date.today()
+        trader._active_trade_id = 42
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_cursor.__enter__ = lambda s: mock_cursor
+        mock_cursor.__exit__ = MagicMock(return_value=False)
+        # _write_trade_close SELECT → direction + entry_price
+        mock_cursor.fetchone.return_value = {"direction": "LONG", "entry_price": 17000.0}
+        mock_cursor.fetchall.return_value = []
+        mock_conn.cursor.return_value = mock_cursor
+        trader._conn = mock_conn
+
+        # Patch _poll_latest_tick so it always returns a synthetic tick dict
+        # (avoids coupling to fetchone call ordering in _maybe_eod's internals)
+        self._tick_patcher = patch.object(
+            live_trader, "_poll_latest_tick",
+            return_value={"price": 17005.0, "ts": datetime.datetime.now(tz=ET)})
+        self._tick_patcher.start()
+
+        # Put strategy in IN_POSITION state
+        from strategy.micro_orb import StrategyState, _Position
+        trader._strategy.state = StrategyState.IN_POSITION
+        trader._strategy._position = _Position(
+            direction="LONG", entry_price=17000.0,
+            stop_loss=16985.0, target=17030.0,
+            entry_ts=datetime.datetime.now(tz=ET))
+        return trader, mock_conn, mock_cursor
+
+    def tearDown(self):
+        if hasattr(self, "_tick_patcher"):
+            self._tick_patcher.stop()
+
+    def test_eod_flatten_stops_loop(self):
+        """_maybe_eod after rth_close must set _running=False."""
+        import live_trader
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader, _, _ = self._make_trader_in_position(tmpdir)
+            trader._running = True
+            # Time is past rth_close="09:31:00"
+            now_et = datetime.datetime(2026, 1, 2, 9, 32, tzinfo=ET)
+            trader._maybe_eod(now_et)
+            self.assertFalse(trader._running,
+                             "_running must be False after EOD flatten")
+
+    def test_eod_flatten_sets_done_flag(self):
+        """_maybe_eod must set _eod_flatten_done=True to prevent re-triggering."""
+        import live_trader
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader, _, _ = self._make_trader_in_position(tmpdir)
+            now_et = datetime.datetime(2026, 1, 2, 9, 32, tzinfo=ET)
+            trader._maybe_eod(now_et)
+            self.assertTrue(trader._eod_flatten_done)
+
+    def test_eod_flatten_idempotent(self):
+        """Calling _maybe_eod twice must not double-exit."""
+        import live_trader
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader, mock_conn, _ = self._make_trader_in_position(tmpdir)
+            now_et = datetime.datetime(2026, 1, 2, 9, 32, tzinfo=ET)
+            trader._maybe_eod(now_et)
+            # Second call must be a no-op
+            call_count_before = mock_conn.cursor.call_count
+            trader._maybe_eod(now_et)
+            self.assertEqual(mock_conn.cursor.call_count, call_count_before,
+                             "Second EOD call must not write to DB again")
+
+    def test_eod_not_triggered_before_close(self):
+        """_maybe_eod must not flatten before rth_close."""
+        import live_trader
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader, _, _ = self._make_trader_in_position(tmpdir)
+            trader._running = True
+            now_et = datetime.datetime(2026, 1, 2, 9, 29, tzinfo=ET)  # before 09:31
+            trader._maybe_eod(now_et)
+            self.assertTrue(trader._running, "_running must stay True before EOD")
+            self.assertFalse(trader._eod_flatten_done)
+
+
+# ── DB reconnect limit tests ──────────────────────────────────────────────────
+
+@pytest.mark.fast
+class TestBarLoopReconnectLimit(unittest.TestCase):
+
+    def _make_trader(self, tmpdir: str):
+        import live_trader
+        cfg = _make_config()
+        cfg["state_path"] = os.path.join(tmpdir, "live_state.json")
+        cfg["pid_path"] = os.path.join(tmpdir, "live_trader.pid")
+        return live_trader.LiveTrader(cfg, dry_run=True)
+
+    def test_reconnect_counter_increments_on_pg_error(self):
+        """Each OperationalError in _bar_loop must increment _reconnect_failures."""
+        import live_trader, psycopg2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = self._make_trader(tmpdir)
+            trader._conn = MagicMock()
+            # Make _poll_latest_bar raise OperationalError
+            with patch.object(live_trader, "_poll_latest_bar",
+                              side_effect=psycopg2.OperationalError("connection reset")):
+                with patch.object(live_trader, "_pg_connect_with_retry",
+                                  return_value=MagicMock()):
+                    trader._bar_loop()
+            self.assertEqual(trader._reconnect_failures, 1)
+
+    def test_reconnect_counter_resets_on_success(self):
+        """A successful _poll_latest_bar must reset _reconnect_failures to 0."""
+        import live_trader, psycopg2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = self._make_trader(tmpdir)
+            trader._reconnect_failures = 5
+            trader._last_bar_ts = None
+            trader._conn = MagicMock()
+            # Successful poll returns None (no new bar)
+            with patch.object(live_trader, "_poll_latest_bar", return_value=None):
+                trader._bar_loop()
+            self.assertEqual(trader._reconnect_failures, 0)
+
+    def test_halt_after_max_failures(self):
+        """After MAX_RECONNECT_FAILURES consecutive errors, _running must be False."""
+        import live_trader, psycopg2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trader = self._make_trader(tmpdir)
+            trader._conn = MagicMock()
+            trader._running = True
+            trader._reconnect_failures = live_trader.LiveTrader._MAX_RECONNECT_FAILURES - 1
+            with patch.object(live_trader, "_poll_latest_bar",
+                              side_effect=psycopg2.OperationalError("connection reset")):
+                with patch.object(live_trader, "_pg_connect_with_retry",
+                                  return_value=MagicMock()):
+                    trader._bar_loop()
+            self.assertFalse(trader._running,
+                             "_running must be False after max reconnect failures")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

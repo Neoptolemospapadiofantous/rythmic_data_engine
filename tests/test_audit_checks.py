@@ -443,7 +443,7 @@ def test_config_schema_import_error(monkeypatch):
     original_import = builtins.__import__
 
     def mock_import(name, *args, **kwargs):
-        if "use_env" in name:
+        if "live_config_schema" in name:
             raise ImportError("mocked")
         return original_import(name, *args, **kwargs)
 

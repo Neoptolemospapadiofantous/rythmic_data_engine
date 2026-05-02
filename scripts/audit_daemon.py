@@ -799,7 +799,7 @@ def check_config_schema(live_cfg: dict | None) -> dict:
                 "value": -1}
     try:
         sys.path.insert(0, str(ENGINE_DIR))
-        from scripts.use_env import LiveConfig  # type: ignore[import]
+        from config.live_config_schema import LiveConfig  # type: ignore[import]
         LiveConfig.model_validate(live_cfg)
         return {"check": "config_schema", "status": "PASS",
                 "message": "live_config.json passes Pydantic schema validation",
