@@ -419,7 +419,7 @@ class LiveTrader:
         self._point_value: float = float(config["orb"].get("point_value", 2.0))
         self._log = logging.getLogger("live_trader")
         self._strategy = MicroORBStrategy(config)
-        self._conn: Optional[object] = None
+        self._conn: Optional[psycopg2.extensions.connection] = None
         self._running = False
         self._session_date: Optional[datetime.date] = None
         self._active_trade_id: Optional[int] = None
@@ -460,8 +460,9 @@ class LiveTrader:
             if (self._strategy.state.name == "IN_POSITION"
                     and self._active_trade_id is not None and self._conn is not None):
                 latest_tick = _poll_latest_tick(self._conn, self._symbol, None)
+                _cur_pos = self._strategy.current_position()
                 exit_price = (float(latest_tick["price"]) if latest_tick
-                              else self._strategy.current_position().entry_price)
+                              else (float(_cur_pos.entry_price) if _cur_pos else 0.0))
                 exit_ts = datetime.datetime.now(tz=datetime.timezone.utc)
                 _write_trade_close(self._conn, self._active_trade_id,
                                    exit_price, exit_ts, reason, self._point_value)
@@ -616,6 +617,7 @@ class LiveTrader:
             time.sleep(TICK_POLL_INTERVAL)
 
     def _on_signal(self, signal: Signal) -> None:
+        assert self._session_date is not None, "session_date must be set before signals fire"
         # Write DB record first so a Rithmic fill always has a corresponding DB entry
         pending_order_id = f"PENDING-{datetime.datetime.now(datetime.timezone.utc).strftime('%H%M%S%f')}"
         self._active_trade_id = _write_trade_open(
@@ -669,8 +671,9 @@ class LiveTrader:
                 latest_tick = _poll_latest_tick(self._conn, self._symbol, None)
                 exit_price = float(latest_tick["price"]) if latest_tick else 0.0
                 self._on_exit(exit_price, datetime.datetime.now(tz=datetime.timezone.utc), "EOD_FLATTEN")
-            _write_session_summary(self._conn, self._session_date,
-                                   self._dry_run, "EOD_FLATTEN")
+            if self._session_date is not None:
+                _write_session_summary(self._conn, self._session_date,
+                                       self._dry_run, "EOD_FLATTEN")
             self._eod_flatten_done = True
             self._running = False  # Stop after EOD
 
@@ -781,7 +784,8 @@ class LiveTrader:
         except Exception as exc:
             self._log.debug("_write_state error (non-fatal): %s", exc)
             try:
-                self._conn.rollback()
+                if self._conn is not None:
+                    self._conn.rollback()
             except Exception:
                 pass
 
