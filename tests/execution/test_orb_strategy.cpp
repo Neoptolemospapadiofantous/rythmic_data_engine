@@ -226,8 +226,8 @@ TEST(no_double_entry_short) {
     ASSERT(signals[0].signal == OrbSignal::SELL);
 }
 
-// 8. Both BUY and SELL are independent — only first direction in each side fires
-//    "first break wins" — once long_taken, no more longs; short side still open
+// 8. BUY then SELL: flatten between to allow second entry
+//    in_position blocks re-entry; notify_trade_filled() clears it.
 TEST(buy_then_sell_both_fire_independently) {
     OrbConfig cfg = make_cfg();
     cfg.max_daily_trades = 3;
@@ -236,13 +236,17 @@ TEST(buy_then_sell_both_fire_independently) {
 
     s.seed_orb_range(19100.0, 18950.0);
 
-    // First: breakout above — BUY
+    // First: breakout above — BUY, in_position = true
     s.on_tick(make_tick(10, 10, 0, 19105.0));
-    // Second: breakout below — SELL (different direction, allowed)
-    s.on_tick(make_tick(10, 11, 0, 18940.0));
-
-    ASSERT_EQ(signals.size(), (size_t)2);
+    ASSERT_EQ(signals.size(), (size_t)1);
     ASSERT(signals[0].signal == OrbSignal::BUY);
+
+    // Simulate fill → flat again so the short side can fire
+    s.notify_trade_filled(OrbSignal::BUY);
+
+    // Second: breakout below — SELL (now allowed since flat)
+    s.on_tick(make_tick(10, 11, 0, 18940.0));
+    ASSERT_EQ(signals.size(), (size_t)2);
     ASSERT(signals[1].signal == OrbSignal::SELL);
 }
 
@@ -325,7 +329,7 @@ TEST(risk_halt_blocks_all_signals) {
     ASSERT(s.session().risk_halted);
 }
 
-// 14. reset_session clears all state including halt, taken flags, and orb_set
+// 14. reset_session clears all state including halt, in_position, and orb_set
 TEST(reset_session_clears_all_state) {
     OrbConfig cfg = make_cfg();
     std::vector<CapturedSignal> signals;
@@ -339,8 +343,7 @@ TEST(reset_session_clears_all_state) {
 
     ASSERT(!s.orb_set());
     ASSERT(!s.session().risk_halted);
-    ASSERT(!s.session().long_taken);
-    ASSERT(!s.session().short_taken);
+    ASSERT(!s.session().in_position);
     ASSERT_EQ(s.session().trades_today, 0);
 
     // After reset and re-seeding, signals fire again
@@ -391,19 +394,27 @@ TEST(eod_flatten_emits_only_once) {
     ASSERT_EQ(signals.size(), (size_t)1);
 }
 
-// 18. notify_trade_filled sets directional flags (affirming existing state)
-TEST(notify_trade_filled_sets_direction_flags) {
+// 18. notify_trade_filled clears in_position, allowing next entry
+TEST(notify_trade_filled_clears_in_position) {
     OrbConfig cfg = make_cfg();
     std::vector<CapturedSignal> signals;
     OrbStrategy s = make_strategy(cfg, signals);
 
-    ASSERT(!s.session().long_taken);
-    s.notify_trade_filled(OrbSignal::BUY);
-    ASSERT(s.session().long_taken);
-    ASSERT(!s.session().short_taken);
+    s.seed_orb_range(19100.0, 18950.0);
 
+    // Enter long — in_position becomes true
+    s.on_tick(make_tick(10, 10, 0, 19105.0));
+    ASSERT(s.session().in_position);
+
+    // Fill notification — in_position cleared
+    s.notify_trade_filled(OrbSignal::BUY);
+    ASSERT(!s.session().in_position);
+
+    // Now a short entry is possible
+    s.on_tick(make_tick(10, 11, 0, 18940.0));
+    ASSERT(s.session().in_position);
     s.notify_trade_filled(OrbSignal::SELL);
-    ASSERT(s.session().short_taken);
+    ASSERT(!s.session().in_position);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -425,7 +436,7 @@ int main() {
     RUN(eod_flatten_emitted_at_1555);
     RUN(no_eod_flatten_before_1555);
     RUN(eod_flatten_emits_only_once);
-    RUN(notify_trade_filled_sets_direction_flags);
+    RUN(notify_trade_filled_clears_in_position);
 
     std::cout << "\n" << (tests_run - tests_failed) << "/" << tests_run << " passed\n";
     return tests_failed > 0 ? 1 : 0;
