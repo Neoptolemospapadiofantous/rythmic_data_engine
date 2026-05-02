@@ -336,18 +336,29 @@ def main():
     if not args.no_pg:
         try:
             conn = _pg_connect()
-            all_findings.extend(check_tick_timestamp_monotonicity(conn))
-            all_findings.extend(check_tick_deduplication(conn))
-            all_findings.extend(check_price_continuity(conn))
-            all_findings.extend(check_bbo_validity(conn))
-            all_findings.extend(check_bar_ohlc_integrity(conn))
-            all_findings.extend(check_data_gaps_rth(conn))
-            all_findings.extend(check_source_consistency(conn))
-            all_findings.extend(check_walk_forward_windows(conn))
-            all_findings.extend(check_oot_holdout_isolation(conn))
-            conn.close()
         except Exception as e:
             all_findings.append(_fail("pg_connection", f"Cannot connect to PG: {e}"))
+            conn = None
+
+        if conn is not None:
+            try:
+                all_findings.extend(check_tick_timestamp_monotonicity(conn))
+                all_findings.extend(check_tick_deduplication(conn))
+                all_findings.extend(check_price_continuity(conn))
+                all_findings.extend(check_bbo_validity(conn))
+                all_findings.extend(check_bar_ohlc_integrity(conn))
+                all_findings.extend(check_data_gaps_rth(conn))
+                all_findings.extend(check_source_consistency(conn))
+                all_findings.extend(check_walk_forward_windows(conn))
+                all_findings.extend(check_oot_holdout_isolation(conn))
+                conn.close()
+            except Exception as e:
+                err = str(e).lower()
+                if "does not exist" in err or "42p01" in err:
+                    all_findings.append({"status": "INFO", "check": "pg_data_checks",
+                                         "message": "ticks table not created — collector not started yet"})
+                else:
+                    all_findings.append(_fail("pg_connection", f"PG data check error: {e}"))
 
     passed = sum(1 for f in all_findings if f["status"] == "PASS")
     failed = sum(1 for f in all_findings if f["status"] == "FAIL")

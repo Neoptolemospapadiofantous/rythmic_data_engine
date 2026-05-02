@@ -246,7 +246,8 @@ class TestGoLiveGates(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
     def test_db_success_gate_passes(self):
-        with patch("go_live._check_db_connection", return_value=(True, "ok")):
+        with patch("go_live._check_db_connection", return_value=(True, "ok")), \
+             patch("go_live._check_audit_daemon_running", return_value=(True, "mocked")):
             code = self._run()
         # Other gates still pass; only checking DB gate doesn't veto
         # (if all gates pass with no --confirm-live → exit 0)
@@ -273,7 +274,8 @@ class TestGoLiveGates(unittest.TestCase):
         cfg["ml"]["enabled"] = False
         self._write_cfg(cfg)
         (self.tmp / "models" / "orb_xgb_latest.pkl").unlink()
-        with patch("go_live._check_db_connection", return_value=(True, "ok")):
+        with patch("go_live._check_db_connection", return_value=(True, "ok")), \
+             patch("go_live._check_audit_daemon_running", return_value=(True, "mocked")):
             code = self._run()
         self.assertEqual(code, 0)
 
@@ -290,9 +292,10 @@ class TestGoLiveGates(unittest.TestCase):
     def test_disk_space_gate_passes_when_sufficient(self):
         mock_usage = MagicMock()
         mock_usage.free = 10 * 1024 ** 3  # 10 GB
-        with patch("shutil.disk_usage", return_value=mock_usage):
-            with patch("go_live._check_db_connection", return_value=(True, "ok")):
-                code = self._run()
+        with patch("shutil.disk_usage", return_value=mock_usage), \
+             patch("go_live._check_db_connection", return_value=(True, "ok")), \
+             patch("go_live._check_audit_daemon_running", return_value=(True, "mocked")):
+            code = self._run()
         self.assertEqual(code, 0)
 
     # ── gate H: DRIFT_HALT ────────────────────────────────────────
@@ -325,7 +328,8 @@ class TestGoLiveGates(unittest.TestCase):
 
     def test_all_pass_no_confirm_exits_zero_dry_run_unchanged(self):
         """All gates pass, no --confirm-live → exit 0, dry_run still True."""
-        with patch("go_live._check_db_connection", return_value=(True, "ok")):
+        with patch("go_live._check_db_connection", return_value=(True, "ok")), \
+             patch("go_live._check_audit_daemon_running", return_value=(True, "mocked")):
             code = self._run()
         self.assertEqual(code, 0)
         cfg = json.loads((self.tmp / "config" / "live_config.json").read_text())
@@ -333,7 +337,8 @@ class TestGoLiveGates(unittest.TestCase):
 
     def test_all_pass_with_confirm_sets_dry_run_false(self):
         """All gates pass + --confirm-live → dry_run written as False."""
-        with patch("go_live._check_db_connection", return_value=(True, "ok")):
+        with patch("go_live._check_db_connection", return_value=(True, "ok")), \
+             patch("go_live._check_audit_daemon_running", return_value=(True, "mocked")):
             code = self._run(["--confirm-live"])
         self.assertEqual(code, 0)
         cfg = json.loads((self.tmp / "config" / "live_config.json").read_text())
