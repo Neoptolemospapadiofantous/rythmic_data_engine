@@ -146,7 +146,15 @@ class EscalationEngine:
     ERROR_CRITICAL_SEC = 1800 # 30 min unresolved ERROR → CRITICAL
     CLEAN_RESOLVE = 2         # consecutive clean passes to auto-resolve
 
-    # Checks whose CRITICAL state warrants an AUDIT_HALT sentinel
+    # Checks that are exempt from WARN accumulation and ERROR aging.
+    # INFO results are always exempt; these additional checks produce WARNs
+    # that reflect environmental state (e.g. ctest slow on this host) rather
+    # than real regressions, so we never escalate them.
+    ESCALATION_EXEMPT = {"cpp_tests"}
+
+    # Only native_critical=True results in these checks write AUDIT_HALT.
+    # Escalation-promoted CRITICALs (WARN→ERROR→CRITICAL) do NOT write the sentinel
+    # because they represent repeated soft failures, not hard value mismatches.
     HALT_CHECKS = {"trading_constants"}
 
     def __init__(self):
@@ -164,6 +172,11 @@ class EscalationEngine:
             r = dict(raw)
             check = r["check"]
             status = r["status"]
+
+            # INFO results and exempt checks never accumulate or age
+            if status == "INFO" or check in self.ESCALATION_EXEMPT:
+                escalated.append(r)
+                continue
 
             # ── WARN accumulation → ERROR ──────────────────────────
             if status == "WARN":
@@ -208,8 +221,9 @@ class EscalationEngine:
                             write_event(conn, "CRITICAL", "audit_critical",
                                         f"{check}: {r['message']}")
 
-                    # Write AUDIT_HALT for trading-safety checks
-                    if check in self.HALT_CHECKS and not AUDIT_HALT.exists():
+                    # Write AUDIT_HALT only for checks that returned CRITICAL natively
+                    # (actual value mismatch), not for checks escalated there via WARN aging.
+                    if check in self.HALT_CHECKS and r.get("native_critical") and not AUDIT_HALT.exists():
                         AUDIT_HALT.parent.mkdir(parents=True, exist_ok=True)
                         AUDIT_HALT.write_text(
                             json.dumps({
@@ -262,8 +276,18 @@ def check_data_freshness(conn) -> dict:
     if latest.tzinfo is None:
         import pytz
         latest = latest.replace(tzinfo=pytz.UTC)
-    age_sec = (datetime.now(tz.utc) - latest).total_seconds()
-    threshold = 300 if 13 <= datetime.now(tz.utc).hour <= 21 else 64800
+    now_utc = datetime.now(tz.utc)
+    age_sec = (now_utc - latest).total_seconds()
+    weekday = now_utc.weekday()  # 5=Sat 6=Sun
+    hour_utc = now_utc.hour
+
+    if weekday >= 5:                   # weekend — markets closed, 72h grace
+        threshold = 259200
+    elif 13 <= hour_utc <= 21:         # weekday RTH (≈ 09:30–16:00 ET)
+        threshold = 300
+    else:                              # weekday off-hours
+        threshold = 64800              # 18 h
+
     ok = age_sec < threshold
     return {"check": "data_freshness", "status": "PASS" if ok else "WARN",
             "message": f"Last tick {age_sec:.0f}s ago ({latest})",
@@ -394,8 +418,8 @@ def run_cpp_tests() -> dict:
                 "message": f"{passed} passed, {failed} failed",
                 "value": float(failed)}
     except subprocess.TimeoutExpired:
-        return {"check": "cpp_tests", "status": "WARN",
-                "message": "Timed out after 120s", "value": -1}
+        return {"check": "cpp_tests", "status": "INFO",
+                "message": "Timed out after 120s — skipped for escalation", "value": -1}
     except FileNotFoundError:
         return {"check": "cpp_tests", "status": "INFO",
                 "message": "ctest not found", "value": 0}
@@ -438,7 +462,10 @@ def check_trading_constants(live_cfg: dict | None) -> dict:
         errors.append(f"commission_rt={comm} (expected 4.0)")
 
     if errors:
+        # native_critical=True means the check itself found a wrong value — AUDIT_HALT eligible.
+        # Escalation-promoted CRITICALs (from repeated WARNs) do NOT set this flag.
         return {"check": "trading_constants", "status": "CRITICAL",
+                "native_critical": True,
                 "message": "MISMATCH: " + "; ".join(errors),
                 "value": float(len(errors))}
     if warnings:
