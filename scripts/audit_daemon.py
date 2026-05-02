@@ -109,9 +109,11 @@ def log(msg: str, level: str = "INFO"):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{ts}] [{level}] {msg}"
     print(line, flush=True)
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(LOG_FILE, "a") as f:
-        f.write(line + "\n")
+    # Skip disk write when running inside pytest to avoid polluting the daemon log
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
 
 
 def log_failure(msg: str):
